@@ -1,9 +1,8 @@
 name: Publish Image
 
 on:
-  push:
-    tags: ['v*']
-    branches: [master]
+  # Disabled on our fork — pushes to upstream's GHCR (professionalwiki), not ours.
+  # Our ci.yml handles build + push to ghcr.io/pmlabs-org/mcp-mediawiki.
   workflow_dispatch:
 
 permissions:
