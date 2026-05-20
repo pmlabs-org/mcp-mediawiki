@@ -1,4 +1,4 @@
-import { USER_AGENT } from '../server.js';
+import { USER_AGENT } from '../runtime/constants.js';
 import { wikiService } from './wikiService.js';
 import { Mwn, MwnOptions } from 'mwn';
 

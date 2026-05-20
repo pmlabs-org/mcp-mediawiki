@@ -1,5 +1,5 @@
 import fetch, { Response } from 'node-fetch';
-import { USER_AGENT } from '../server.js';
+import { USER_AGENT } from '../runtime/constants.js';
 import { wikiService } from './wikiService.js';
 import { getMwn, clearMwnCache } from './mwn.js';
 
