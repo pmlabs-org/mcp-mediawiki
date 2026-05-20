@@ -1,113 +1,77 @@
-// TODO: Make tools into an interface
 import { z } from 'zod';
-/* eslint-disable n/no-missing-import */
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-/* eslint-enable n/no-missing-import */
-import { wikiService } from '../common/wikiService.js';
-import { makeRestGetRequest } from '../common/utils.js';
-import { getMwn } from '../common/mwn.js';
-import type { MwRestApiSearchPageResponse, MwRestApiSearchResultObject } from '../types/mwRestApi.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { ApiSearchResult } from 'mwn';
+import type { Tool } from '../runtime/tool.js';
+import type { ToolContext } from '../runtime/context.js';
+import { getPageUrl } from '../wikis/utils.js';
+import type { TruncationInfo } from '../results/truncation.js';
 
-export function searchPageTool( server: McpServer ): RegisteredTool {
-	// TODO: Not having named parameters is a pain,
-	// but using low-level Server type or using a wrapper function are addedd complexity
-	return server.tool(
-		'search-page',
-		'Search wiki page titles and contents for the provided search terms, and returns matching pages.',
-		{
-			query: z.string().describe( 'Search terms' ),
-			limit: z.number().int().min( 1 ).max( 100 ).optional().describe( 'Maximum number of search results to return' )
-		},
-		{
-			title: 'Search page',
-			readOnlyHint: true,
-			destructiveHint: false
-		} as ToolAnnotations,
-		async ( { query, limit } ) => handleSearchPageTool( query, limit )
-	);
-}
+const inputSchema = {
+	query: z.string().describe('Search terms'),
+	limit: z
+		.number()
+		.int()
+		.min(1)
+		.max(100)
+		.optional()
+		.describe('Maximum number of search results to return'),
+} as const;
 
-async function handleSearchPageTool( query: string, limit?: number ): Promise< CallToolResult > {
-	// Try REST API first, fall back to Action API (needed for private wikis
-	// or wikis without CirrusSearch)
-	let data: MwRestApiSearchPageResponse;
-	try {
-		data = await makeRestGetRequest<MwRestApiSearchPageResponse>(
-			'/v1/search/page',
-			{ q: query, ...( limit ? { limit: limit.toString() } : {} ) }
-		);
-	} catch {
-		// REST API failed — fall back to Action API via mwn
-		data = { pages: [] };
-	}
+export const searchPage: Tool<typeof inputSchema> = {
+	name: 'search-page',
+	description:
+		'Searches wiki page titles and page content (full-text) for the provided terms. Returns matching pages with a snippet, size, and timestamp. Accepts up to 100 matches per call (default 10); additional matches beyond the cap are flagged in the response — narrow the query to surface more. For title-prefix lookup (e.g. autocomplete), use search-page-by-prefix.',
+	inputSchema,
+	annotations: {
+		title: 'Search page',
+		readOnlyHint: true,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	} as ToolAnnotations,
+	failureVerb: 'retrieve search data',
+	target: (a) => a.query,
 
-	const pages = data.pages || [];
-	if ( pages.length === 0 ) {
-		// Fall back to Action API search (works on all wikis including private ones)
-		try {
-			return await searchViaActionApi( query, limit );
-		} catch ( error ) {
-			return {
-				content: [
-					{ type: 'text', text: `Failed to retrieve search data: ${ ( error as Error ).message }` } as TextContent
-				],
-				isError: true
-			};
-		}
-	}
+	async handle({ query, limit }, ctx: ToolContext): Promise<CallToolResult> {
+		const mwn = await ctx.mwn();
 
-	return {
-		content: pages.map( getSearchResultToolResult )
-	};
-}
-
-async function searchViaActionApi( query: string, limit?: number ): Promise< CallToolResult > {
-	const mwn = await getMwn();
-	const response = await mwn.request( {
-		action: 'query',
-		list: 'search',
-		srsearch: query,
-		srlimit: limit || 10,
-		srprop: 'snippet|size|wordcount',
-		format: 'json'
-	} ) as { query: { search: Array<{ title: string; pageid: number; snippet: string; size: number; wordcount: number }> } };
-
-	const results = response.query?.search || [];
-	if ( results.length === 0 ) {
-		return {
-			content: [
-				{ type: 'text', text: `No pages found for ${ query }` } as TextContent
-			]
+		const params: Record<string, string | number | boolean> = {
+			action: 'query',
+			list: 'search',
+			srsearch: query,
+			srwhat: 'text',
+			srprop: 'snippet|size|timestamp|wordcount',
+			formatversion: '2',
 		};
-	}
 
-	const { server, articlepath } = wikiService.getCurrent().config;
-	return {
-		content: results.map( ( result ): TextContent => ( {
-			type: 'text',
-			text: [
-				`Title: ${ result.title }`,
-				`Description: ${ result.snippet.replace( /<[^>]*>/g, '' ) }`,
-				`Page ID: ${ result.pageid }`,
-				`Page URL: ${ server }${ articlepath }/${ encodeURIComponent( result.title.replace( / /g, '_' ) ) }`,
-				`Size: ${ result.size } bytes, ${ result.wordcount } words`
-			].join( '\n' )
-		} ) )
-	};
-}
+		if (limit !== undefined) {
+			params.srlimit = limit;
+		}
 
-// TODO: Decide how to handle the tool's result
-function getSearchResultToolResult( result: MwRestApiSearchResultObject ): TextContent {
-	const { server, articlepath } = wikiService.getCurrent().config;
-	return {
-		type: 'text',
-		text: [
-			`Title: ${ result.title }`,
-			`Description: ${ result.description ?? 'Not available' }`,
-			`Page ID: ${ result.id }`,
-			`Page URL: ${ `${ server }${ articlepath }/${ result.key }` }`,
-			`Thumbnail URL: ${ result.thumbnail?.url ?? 'Not available' }`
-		].join( '\n' )
-	};
-}
+		const response = await mwn.request(params);
+		const searchResults: ApiSearchResult[] = response.query?.search ?? [];
+
+		const truncation: TruncationInfo | null = response.continue
+			? {
+					reason: 'capped-no-continuation',
+					returnedCount: searchResults.length,
+					limit: limit ?? 10,
+					itemNoun: 'matches',
+					narrowHint: 'narrow the query or raise limit (max 100)',
+				}
+			: null;
+
+		return ctx.format.ok({
+			results: searchResults.map((r) => ({
+				title: r.title,
+				pageId: r.pageid,
+				snippet: r.snippet,
+				size: r.size,
+				wordCount: (r as ApiSearchResult & { wordcount?: number }).wordcount,
+				timestamp: r.timestamp,
+				url: getPageUrl(r.title, ctx.activeWiki),
+			})),
+			...(truncation !== null ? { truncation } : {}),
+		});
+	},
+};

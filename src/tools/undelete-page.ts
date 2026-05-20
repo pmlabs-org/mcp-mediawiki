@@ -1,61 +1,45 @@
 import { z } from 'zod';
-/* eslint-disable n/no-missing-import */
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
 import type { ApiUndeleteResponse } from 'mwn';
-/* eslint-enable n/no-missing-import */
-import { getMwn } from '../common/mwn.js';
-import { formatEditComment } from '../common/utils.js';
+import type { ApiUndeleteParams } from 'types-mediawiki-api';
+import type { Tool } from '../runtime/tool.js';
+import type { ToolContext } from '../runtime/context.js';
+import { formatEditComment } from '../wikis/utils.js';
 
-export function undeletePageTool( server: McpServer ): RegisteredTool {
-	return server.tool(
-		'undelete-page',
-		'Undeletes a wiki page.',
-		{
-			title: z.string().describe( 'Wiki page title' ),
-			comment: z.string().optional().describe( 'Reason for undeleting the page' )
-		},
-		{
-			title: 'Undelete page',
-			readOnlyHint: false,
-			destructiveHint: true
-		} as ToolAnnotations,
-		async (
-			{ title, comment }
-		) => handleUndeletePageTool( title, comment )
-	);
-}
+const inputSchema = {
+	title: z.string().describe('Wiki page title'),
+	comment: z.string().optional().describe('Reason for undeleting the page'),
+} as const;
 
-async function handleUndeletePageTool(
-	title: string,
-	comment?: string
-): Promise<CallToolResult> {
-	let data: ApiUndeleteResponse;
-	try {
-		const mwn = await getMwn();
-		data = await mwn.undelete( title, formatEditComment( 'undelete-page', comment ) );
-	} catch ( error ) {
-		return {
-			content: [
-				{
-					type: 'text',
-					text: `Undelete failed: ${ ( error as Error ).message }`
-				} as TextContent
-			],
-			isError: true
-		};
-	}
+export const undeletePage: Tool<typeof inputSchema> = {
+	name: 'undelete-page',
+	description:
+		'Restores a previously deleted wiki page, including its full revision history, and returns the restored title. The page must currently be in a deleted state (from delete-page); fails if no deleted revisions exist for the title or the authenticated user lacks the undelete permission.',
+	inputSchema,
+	annotations: {
+		title: 'Undelete page',
+		readOnlyHint: false,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	} as ToolAnnotations,
+	failureVerb: 'undelete page',
+	target: (a) => a.title,
 
-	return {
-		content: undeletePageToolResult( data )
-	};
-}
+	async handle({ title, comment }, ctx: ToolContext): Promise<CallToolResult> {
+		const mwn = await ctx.mwn();
+		const options = ctx.edit.applyTags<ApiUndeleteParams>({});
+		const data: ApiUndeleteResponse & { revisions?: number } = await mwn.undelete(
+			title,
+			formatEditComment('undelete-page', comment),
+			options,
+		);
 
-function undeletePageToolResult( data: ApiUndeleteResponse ): TextContent[] {
-	return [
-		{
-			type: 'text',
-			text: `Page undeleted successfully: ${ data.title }`
-		}
-	];
-}
+		return ctx.format.ok({
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- mwn API response shape; trusted at this boundary
+			title: data.title as string,
+			restored: true as const,
+			revisionCount: data.revisions,
+		});
+	},
+};

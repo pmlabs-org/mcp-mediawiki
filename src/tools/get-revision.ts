@@ -1,115 +1,128 @@
 import { z } from 'zod';
-/* eslint-disable n/no-missing-import */
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-/* eslint-enable n/no-missing-import */
-import { makeRestGetRequest } from '../common/utils.js';
-import type { MwRestApiRevisionObject } from '../types/mwRestApi.js';
-import { ContentFormat, getSubEndpoint } from '../common/mwRestApiContentFormat.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { ApiPage, ApiRevision } from 'mwn';
+import type { Tool } from '../runtime/tool.js';
+import type { ToolContext } from '../runtime/context.js';
+import { getPageUrl } from '../wikis/utils.js';
+import { ContentFormat } from '../results/contentFormat.js';
 
-export function getRevisionTool( server: McpServer ): RegisteredTool {
-	return server.tool(
-		'get-revision',
-		'Returns a revision of a wiki page.',
-		{
-			revisionId: z.number().int().positive().describe( 'Revision ID' ),
-			content: z.nativeEnum( ContentFormat ).describe( 'Type of content to return' ).optional().default( ContentFormat.source ),
-			metadata: z.boolean().describe( 'Whether to include metadata (revision ID, page ID, page title, user ID, user name, timestamp, comment, size, delta, minor, HTML URL) in the response' ).optional().default( false )
-		},
-		{
-			title: 'Get revision',
-			readOnlyHint: true,
-			destructiveHint: false
-		} as ToolAnnotations,
-		async (
-			{ revisionId, content, metadata }
-		) => handleGetRevisionTool( revisionId, content, metadata )
-	);
-}
+const inputSchema = {
+	revisionId: z.number().int().positive().describe('Revision ID'),
+	content: z
+		.nativeEnum(ContentFormat)
+		.describe('Type of content to return')
+		.optional()
+		.default(ContentFormat.source),
+	metadata: z
+		.boolean()
+		.describe(
+			'Whether to include metadata (revision ID, page ID, page title, user ID, user name, timestamp, comment, size, minor, HTML URL) in the response',
+		)
+		.optional()
+		.default(false),
+} as const;
 
-async function handleGetRevisionTool(
-	revisionId: number, content: ContentFormat, metadata: boolean
-): Promise<CallToolResult> {
-	if ( content === ContentFormat.none && !metadata ) {
-		return {
-			content: [ {
-				type: 'text',
-				text: 'When content is set to "none", metadata must be true'
-			} ],
-			isError: true
-		};
-	}
+export const getRevision: Tool<typeof inputSchema> = {
+	name: 'get-revision',
+	description:
+		'Returns a specific historical revision of a wiki page by revision ID (wikitext source, rendered HTML, or metadata only). If the revision ID does not exist, an error is returned. For the latest revision plus metadata, use get-page with metadata=true.',
+	inputSchema,
+	annotations: {
+		title: 'Get revision',
+		readOnlyHint: true,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	} as ToolAnnotations,
+	failureVerb: 'retrieve revision data',
+	target: (a) => String(a.revisionId),
 
-	try {
-		const data = await makeRestGetRequest<MwRestApiRevisionObject>(
-			`/v1/revision/${ revisionId }${ getSubEndpoint( content ) }`
-		);
-		return {
-			content: getRevisionToolResult( data, content, metadata )
-		};
-	} catch ( error ) {
-		return {
-			content: [
-				{ type: 'text', text: `Failed to retrieve revision data: ${ ( error as Error ).message }` } as TextContent
-			],
-			isError: true
-		};
-	}
-}
+	async handle({ revisionId, content, metadata }, ctx: ToolContext): Promise<CallToolResult> {
+		if (content === ContentFormat.none && !metadata) {
+			return ctx.format.invalidInput('When content is set to "none", metadata must be true');
+		}
 
-function getRevisionToolResult(
-	result: MwRestApiRevisionObject,
-	content: ContentFormat,
-	metadata: boolean
-): TextContent[] {
-	if ( content === ContentFormat.source && !metadata ) {
-		return [ {
-			type: 'text',
-			text: result.source ?? 'Not available'
-		} ];
-	}
+		const mwn = await ctx.mwn();
+		const payload: {
+			revisionId?: number;
+			pageId?: number;
+			title?: string;
+			url?: string;
+			userid?: number;
+			user?: string;
+			timestamp?: string;
+			comment?: string;
+			size?: number;
+			minor?: boolean;
+			contentModel?: string;
+			source?: string;
+			html?: string;
+		} = {};
 
-	if ( content === ContentFormat.html && !metadata ) {
-		return [ {
-			type: 'text',
-			text: result.html ?? 'Not available'
-		} ];
-	}
+		const needsSource = content === ContentFormat.source;
+		const needsMetadata = metadata || content === ContentFormat.none;
 
-	const results: TextContent[] = [ getRevisionMetadataTextContent( result ) ];
+		if (needsSource || needsMetadata) {
+			const rvprop = needsSource
+				? 'ids|timestamp|user|userid|comment|size|flags|content'
+				: 'ids|timestamp|user|userid|comment|size|flags';
 
-	if ( result.source !== undefined ) {
-		results.push( {
-			type: 'text',
-			text: `Source:\n${ result.source }`
-		} );
-	}
+			const response = await mwn.request({
+				action: 'query',
+				prop: 'revisions',
+				revids: revisionId,
+				rvprop,
+				formatversion: '2',
+			});
 
-	if ( result.html !== undefined ) {
-		results.push( {
-			type: 'text',
-			text: `HTML:\n${ result.html }`
-		} );
-	}
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- mwn API response shape; trusted at this boundary
+			const page = response.query?.pages?.[0] as ApiPage | undefined;
+			const rev: ApiRevision | undefined = page?.revisions?.[0];
 
-	return results;
-}
+			if (!rev || !page || page.missing) {
+				return ctx.format.notFound(`Revision ${revisionId} not found`);
+			}
 
-function getRevisionMetadataTextContent( result: MwRestApiRevisionObject ): TextContent {
-	return {
-		type: 'text',
-		text: [
-			`Revision ID: ${ result.id }`,
-			`Page ID: ${ result.page?.id }`,
-			`Page Title: ${ result.page?.title }`,
-			`User ID: ${ result.user.id }`,
-			`User Name: ${ result.user.name }`,
-			`Timestamp: ${ result.timestamp }`,
-			`Comment: ${ result.comment }`,
-			`Size: ${ result.size }`,
-			`Delta: ${ result.delta }`,
-			`Minor: ${ result.minor }`,
-			`HTML URL: ${ result.html_url ?? 'Not available' }`
-		].join( '\n' )
-	};
-}
+			payload.revisionId = rev.revid;
+			payload.pageId = page.pageid;
+			payload.title = page.title;
+			payload.url = getPageUrl(page.title, ctx.activeWiki);
+
+			if (needsMetadata) {
+				payload.userid = rev.userid;
+				payload.user = rev.user;
+				payload.timestamp = rev.timestamp;
+				payload.comment = rev.comment;
+				payload.size = rev.size;
+				payload.minor = rev.minor ?? false;
+			}
+
+			if (needsSource && rev.content !== undefined) {
+				payload.source = rev.content;
+			}
+		}
+
+		if (content === ContentFormat.html) {
+			const parseResult = await mwn.request({
+				action: 'parse',
+				oldid: revisionId,
+				prop: 'text',
+				formatversion: '2',
+			});
+			payload.html = parseResult.parse?.text;
+
+			if (payload.revisionId === undefined) {
+				payload.revisionId = revisionId;
+				if (parseResult.parse?.pageid !== undefined) {
+					payload.pageId = parseResult.parse.pageid;
+				}
+				if (parseResult.parse?.title !== undefined) {
+					payload.title = parseResult.parse.title;
+					payload.url = getPageUrl(parseResult.parse.title, ctx.activeWiki);
+				}
+			}
+		}
+
+		return ctx.format.ok(payload);
+	},
+};

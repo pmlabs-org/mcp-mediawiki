@@ -1,35 +1,84 @@
-/* eslint-disable n/no-missing-import */
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-/* eslint-enable n/no-missing-import */
+import { McpServer, type RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { createRequire } from 'node:module';
+import { registerServer, unregisterServer } from './runtime/logger.js';
 import { registerAllTools } from './tools/index.js';
 import { registerAllResources } from './resources/index.js';
+import { reconcileTools } from './runtime/reconcile.js';
+import { extensionPacks } from './tools/extensions/index.js';
+import type { ToolContext } from './runtime/context.js';
 
 // https://github.com/nodejs/node/issues/51347#issuecomment-2111337854
-const packageInfo = createRequire( import.meta.url )( '../package.json' ) as { version: string };
+// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- compile-time JSON import; ESM `import ... assert { type: 'json' }` migration is a separate follow-up
+const serverInfo = createRequire(import.meta.url)('../server.json') as {
+	title: string;
+	description: string;
+	version: string;
+};
 
 const SERVER_NAME: string = 'mediawiki-mcp-server';
-const SERVER_VERSION: string = packageInfo.version;
 
-export const createServer = (): McpServer => {
+const SERVER_INSTRUCTIONS: string = `Tools and resources for working with one or more MediaWiki wikis. Each configured wiki appears as an \`mcp://wikis/{wikiKey}\` resource. Every tool that operates on a wiki accepts an optional \`wiki\` argument naming the wiki to act on (the wiki-management and OAuth tools do not) — pass a wiki key (or its \`mcp://wikis/{wikiKey}\` URI). Omit it to use the configured default wiki. There is no stateful "current wiki": each call targets exactly the wiki it names, and every response reports the wiki it ran against. Call \`list-wikis\` to discover the configured wikis, their keys, and which extension tools each one supports.
+
+Writes, deletes, and uploads use the caller's \`Authorization: Bearer\` token when present, falling back to credentials configured on the targeted wiki.
+
+Tool errors fall into seven categories: \`not_found\`, \`permission_denied\`, \`invalid_input\`, \`conflict\`, \`authentication\`, \`rate_limited\`, and \`upstream_failure\`. Reads that exceed a per-call cap return a truncation marker describing what was returned and how to fetch the rest.`;
+
+export const createServer = async (ctx: ToolContext): Promise<McpServer> => {
 	const server = new McpServer(
 		{
 			name: SERVER_NAME,
-			version: SERVER_VERSION
+			title: serverInfo.title,
+			version: serverInfo.version,
+			description: serverInfo.description,
 		},
 		{
 			capabilities: {
 				resources: {
-					listChanged: true
-				}
-			}
-		}
+					listChanged: true,
+				},
+				tools: {
+					listChanged: true,
+				},
+				logging: {},
+			},
+			instructions: SERVER_INSTRUCTIONS,
+		},
 	);
 
-	registerAllTools( server );
-	registerAllResources( server );
+	registerServer(server);
+	// The SDK transport only fires onclose on DELETE / explicit transport.close()
+	// / process termination — not on a raw HTTP disconnect. So this registry
+	// drains on the same lifecycle as the existing sessions map in
+	// streamableHttp.ts; long-lived stale sessions persist until DELETE arrives
+	// or the process ends. Acceptable because sendLoggingMessage to a closed
+	// transport rejects, and swallowNotificationError absorbs that quietly.
+	const previousOnClose = server.server.onclose;
+	server.server.onclose = (): void => {
+		unregisterServer(server);
+		previousOnClose?.();
+	};
+
+	const tools = new Map<string, RegisteredTool>();
+	const reconcile = async (): Promise<void> => {
+		await reconcileTools(tools, {
+			wikiRegistry: ctx.wikis,
+			transport: ctx.transport,
+			extensions: ctx.extensions,
+			extensionPacks,
+		});
+		// Notify clients that the wiki resource list may have changed (e.g. after
+		// add-wiki / remove-wiki). Also covers tool-list changes since toggling a
+		// RegisteredTool's enabled state already emits its own listChanged event.
+		server.sendResourceListChanged();
+	};
+
+	const registered = registerAllTools(server, reconcile, ctx);
+	for (const [name, tool] of registered) {
+		tools.set(name, tool);
+	}
+	registerAllResources(server, ctx);
+
+	await reconcile();
 
 	return server;
 };
-
-export const USER_AGENT: string = `${ SERVER_NAME }/${ SERVER_VERSION }`;

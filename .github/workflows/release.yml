@@ -11,6 +11,8 @@ jobs:
     permissions:
       contents: write # For creating release
       id-token: write # For npm provenance and MCP registry OIDC
+    env:
+      LEFTHOOK: '0' # Skip lefthook hooks; this job commits and pushes from CI
     steps:
       - name: Checkout code
         uses: actions/checkout@v6
@@ -18,7 +20,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v6
         with:
-          node-version: '22'
+          node-version: '24'
           registry-url: 'https://registry.npmjs.org/'
 
       - name: Run preversion checks
@@ -32,8 +34,6 @@ jobs:
 
       - name: Publish to npm
         run: npm publish --provenance --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_MCP_WRITE }}
 
       - name: Update server.json (npm)
         run: node scripts/update-server-json-npm.cjs
@@ -50,11 +50,20 @@ jobs:
             git push origin HEAD:master
           fi
 
+      - name: Extract release notes from CHANGELOG
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          node scripts/extract-changelog-section.cjs "$VERSION" > release-notes.md
+          if [ ! -s release-notes.md ]; then
+            echo "::error::Empty CHANGELOG section for $VERSION"
+            exit 1
+          fi
+
       - name: Create Release
         uses: softprops/action-gh-release@v3
         with:
           files: '*.mcpb'
-          generate_release_notes: true
+          body_path: release-notes.md
 
       - name: Install MCP Publisher
         run: |

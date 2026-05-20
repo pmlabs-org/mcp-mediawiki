@@ -1,65 +1,83 @@
 # AGENTS.md
 
-## Unit Tests
+Project context for AI coding agents working on this repo. For human users, start from [README.md](README.md).
 
-Tool handler functions (`handleXxxTool`) must be exported for testability.
+## Repo layout
 
-Tests use Vitest with mocked mwn. Each test file mocks `getMwn` and `wikiService` before any imports that depend on them:
+- `src/tools/` — one file per non-extension MCP tool (descriptor + handler + registration).
+- `src/tools/extensions/<id>/` — extension packs: tools gated on a specific MediaWiki extension (SMW / Bucket / Cargo / …), grouped under a per-pack module.
+- `src/runtime/` — context, dispatcher, register, reconcile, logger, constants.
+- `src/wikis/` — wiki registry, selection, mwn provider, discovery, error sanitiser.
+- `src/transport/` — stdio and streamable HTTP entry points, SSRF/upload guards, request context, low-level HTTP helpers.
+- `src/config/` — `config.json` loader and substitution.
+- `src/services/` — section, edit, revision, response services consumed via `ToolContext`.
+- `src/results/` — response shaping (truncation, format, schemas).
+- `src/errors/` — error classifier + per-tool special cases.
+- `src/resources/` — MCP resources exposing `mcp://wikis/{wikiKey}`.
+- `src/server.ts`, `src/index.ts` — server factory and bootstrap.
+- `tests/` — vitest suites mirroring the source tree; shared helpers in `tests/helpers/`.
 
-```typescript
-vi.mock( '../../src/common/mwn.js', () => ( { getMwn: vi.fn() } ) );
-vi.mock( '../../src/common/wikiService.js', () => ( {
-	wikiService: {
-		getCurrent: vi.fn().mockReturnValue( {
-			key: 'test-wiki',
-			config: { server: 'https://test.wiki', articlepath: '/wiki', scriptpath: '/w' }
-		} )
-	}
-} ) );
-```
+## Commands
 
-Use `createMockMwn()` from `tests/helpers/mock-mwn.ts` to create mock instances with method overrides.
+- `npm run build` — compile TypeScript to `dist/`.
+- `npm test` — run the vitest suite once.
+- `npm run lint` — oxlint.
+- `npm run fmt` / `npm run fmt:check` — oxfmt (write / dry-run).
+- `npm run preflight` — full gate (install, lint, fmt check, validate `server.json`, test, build, bundle). Run before a release.
+- Git hooks: `lefthook` auto-installs on `npm install`. Pre-commit runs `oxfmt` (auto-fix on staged files) + `oxlint`. Pre-push runs `tsgo --noEmit` + the test suite. Bypass with `--no-verify`.
+- `npm run inspector` — watch-mode build + MCP Inspector UI for interactive debugging.
 
-## Integration Testing with MCP Inspector
+## Tool conventions
 
-The [MCP Inspector CLI](https://github.com/modelcontextprotocol/inspector) tests tools against a real wiki. Build first with `npm run build`, then:
+See [docs/tool-conventions.md](docs/tool-conventions.md) for tool design stance, description voice, parameter docs, annotation hints, sibling disambiguation, canonical MediaWiki terminology, and result-cap behavior. Consult before adding or modifying a tool.
 
-```bash
-# List all tools
-npx @modelcontextprotocol/inspector --cli node dist/index.js \
-  --method tools/list
+## Tool handlers
 
-# Call a tool
-npx @modelcontextprotocol/inspector --cli node dist/index.js \
-  --method tools/call \
-  --tool-name get-page \
-  --tool-arg 'title=Main Page' \
-  --tool-arg 'metadata=true'
+Each tool exports a typed descriptor (`name`, `description`, `inputSchema`, `annotations`, `handle`) from `src/tools/<name>.ts`. Tests import the descriptor and route through `dispatch( descriptor, ctx )` — see `tests/helpers/fakeContext.ts`.
 
-# Read a resource
-npx @modelcontextprotocol/inspector --cli node dist/index.js \
-  --method resources/read \
-  --uri 'mcp://wikis/en.wikipedia.org'
-```
+## Adding or changing tools
 
-Each invocation starts a fresh MCP session, so `set-wiki` does not persist between calls. Set `defaultWiki` in `config.json` to target a specific wiki.
+A PR that adds, removes, or renames a tool — or that materially changes a tool's user-visible behaviour — must also update:
 
-## Local Wiki with Bot Passwords
+- **`README.md`** — the tool table near the top (name, one-line description, OAuth grant required).
+- **`CHANGELOG.md`** — an entry under `## [Unreleased]` (Added / Changed / Removed / Breaking changes as appropriate, per [Keep a Changelog](https://keepachangelog.com/en/1.1.0/)).
 
-Authenticated tools (create, update, delete, undelete, upload) require bot passwords. To set one up on a local MediaWiki:
+Pure-internal refactors that don't change tool surface or behaviour don't need either.
 
-```bash
-docker exec <container> php /var/www/html/w/maintenance/run.php createBotPassword \
-  --appid mcp-server \
-  --grants 'basic,editpage,editprotected,createeditmovepage,uploadfile,highvolume,delete' \
-  <username>
-```
+## Adding an extension pack
 
-Then add the credentials to `config.json` (copy from `config.example.json` if it doesn't exist):
+A pack is a self-describing module exposing tools that share an extension gate. To add one:
 
-```json
-{
-  "username": "<username>@mcp-server",
-  "password": "<generated-password>"
-}
-```
+1. Create `src/tools/extensions/<id>/<id>-<verb>.ts` for each tool, following the conventions in `docs/tool-conventions.md`.
+2. Create `src/tools/extensions/<id>/index.ts` exporting the pack:
+	```ts
+	import type { ExtensionPack } from '../types.js';
+	import { myTool } from './<id>-<verb>.js';
+
+	// Convention: export name folds the id — `smwPack`, `bucketPack`, etc.
+	export const myPack: ExtensionPack = {
+		id: '<id>',
+		extensionNames: ['CanonicalExtensionName' /*, aliases */],
+		tools: [/* tool descriptors */],
+	};
+	```
+3. Add the pack to the `extensionPacks` array in `src/tools/extensions/index.ts`.
+
+Reconcile picks up the new pack automatically — no edits to `src/runtime/reconcile.ts`. README.md and CHANGELOG.md still need updating per the policy in "Adding or changing tools".
+
+## Adding or changing environment variables
+
+A PR that adds, removes, or renames an env var read by the server — or that changes its default or accepted values — must also update:
+
+- **`README.md`** — the environment-variable table.
+- **`server.json`** — the `environmentVariables` array in **both** the `mcpb` and `npm` package blocks.
+- **`CHANGELOG.md`** — an entry under `## [Unreleased]` if the change is user-visible.
+- **`Dockerfile`** — only if the var needs a default baked into the docker image.
+
+## Testing
+
+Tool tests build a `ToolContext` via `fakeContext()` from `tests/helpers/fakeContext.ts` and dispatch through `dispatch( descriptor, ctx )`. Provide an `mwn` factory (typically `createMockMwn()` from `tests/helpers/mock-mwn.ts`) and override only the slices the test exercises. See [docs/testing.md](docs/testing.md) for the full pattern, MCP Inspector CLI examples, and the bot-password setup required to exercise authenticated tools against a local wiki.
+
+## Releasing
+
+See [docs/releasing.md](docs/releasing.md).

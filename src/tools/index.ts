@@ -1,51 +1,113 @@
-/* eslint-disable n/no-missing-import */
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-/* eslint-enable n/no-missing-import */
 
-import { getPageTool } from './get-page.js';
-import { getPageHistoryTool } from './get-page-history.js';
-import { searchPageTool } from './search-page.js';
-import { setWikiTool } from './set-wiki.js';
-import { addWikiTool } from './add-wiki.js';
-import { removeWikiTool } from './remove-wiki.js';
-import { updatePageTool } from './update-page.js';
-import { getFileTool } from './get-file.js';
-import { createPageTool } from './create-page.js';
-import { uploadFileTool } from './upload-file.js';
-import { uploadFileFromUrlTool } from './upload-file-from-url.js';
-import { deletePageTool } from './delete-page.js';
-import { getRevisionTool } from './get-revision.js';
-import { undeletePageTool } from './undelete-page.js';
-import { getCategoryMembersTool } from './get-category-members.js';
-import { searchPageByPrefixTool } from './search-page-by-prefix.js';
+import { errorMessage } from '../errors/isErrnoException.js';
+import { logger } from '../runtime/logger.js';
+import type { Tool } from '../runtime/tool.js';
+import type { ToolContext, ManagementContext } from '../runtime/context.js';
+import type { Reconcile } from '../runtime/reconcile.js';
+import { dispatch } from '../runtime/dispatcher.js';
+import { register } from '../runtime/register.js';
 
-const toolRegistrars = [
-	getPageTool,
-	getPageHistoryTool,
-	searchPageTool,
-	setWikiTool,
-	addWikiTool,
-	removeWikiTool,
-	updatePageTool,
-	getFileTool,
-	createPageTool,
-	uploadFileTool,
-	uploadFileFromUrlTool,
-	deletePageTool,
-	getRevisionTool,
-	undeletePageTool,
-	getCategoryMembersTool,
-	searchPageByPrefixTool
+import { getPage } from './get-page.js';
+import { getPages } from './get-pages.js';
+import { getPageHistory } from './get-page-history.js';
+import { getRecentChanges } from './get-recent-changes.js';
+import { searchPage } from './search-page.js';
+import { searchPageByPrefix } from './search-page-by-prefix.js';
+import { parseWikitext } from './parse-wikitext.js';
+import { comparePages } from './compare-pages.js';
+import { getFile } from './get-file.js';
+import { getRevision } from './get-revision.js';
+import { getCategoryMembers } from './get-category-members.js';
+import { listWikis } from './list-wikis.js';
+import { extensionPacks } from './extensions/index.js';
+import { createPage } from './create-page.js';
+import { updatePage } from './update-page.js';
+import { deletePage } from './delete-page.js';
+import { undeletePage } from './undelete-page.js';
+import { uploadFile } from './upload-file.js';
+import { uploadFileFromUrl } from './upload-file-from-url.js';
+import { updateFile } from './update-file.js';
+import { updateFileFromUrl } from './update-file-from-url.js';
+import { addWiki } from './add-wiki.js';
+import { removeWiki } from './remove-wiki.js';
+import { oauthStatus } from './oauth-status.js';
+import { oauthLogout } from './oauth-logout.js';
+
+// `Tool<any>` widens the heterogeneous-schema array; `inputSchema: TSchema`
+// is invariant in `TSchema`, so `Tool<never>` and `Tool<ZodRawShape>` both
+// fail this assignment. The dispatcher's own generic re-narrows TSchema
+// when each tool's handler is wrapped.
+// oxlint-disable-next-line typescript/no-explicit-any
+const standardTools: Tool<any>[] = [
+	getPage,
+	getPages,
+	getPageHistory,
+	getRecentChanges,
+	searchPage,
+	searchPageByPrefix,
+	parseWikitext,
+	comparePages,
+	getFile,
+	getRevision,
+	getCategoryMembers,
+	listWikis,
+	createPage,
+	updatePage,
+	deletePage,
+	undeletePage,
+	uploadFile,
+	uploadFileFromUrl,
+	updateFile,
+	updateFileFromUrl,
+	oauthStatus,
+	oauthLogout,
 ];
 
-export function registerAllTools( server: McpServer ): RegisteredTool[] {
-	const registeredTools: RegisteredTool[] = [];
-	for ( const registrar of toolRegistrars ) {
+// oxlint-disable-next-line typescript/no-explicit-any
+const managementTools: Tool<any, ManagementContext>[] = [addWiki, removeWiki];
+
+export function registerAllTools(
+	server: McpServer,
+	reconcile: Reconcile,
+	ctx: ToolContext,
+): Map<string, RegisteredTool> {
+	const registered = new Map<string, RegisteredTool>();
+
+	// oxlint-disable-next-line typescript/no-explicit-any
+	const allStandardTools: Tool<any>[] = [
+		...standardTools,
+		...extensionPacks.flatMap((p) => p.tools),
+	];
+	for (const tool of allStandardTools) {
 		try {
-			registeredTools.push( registrar( server ) );
-		} catch ( error ) {
-			console.error( `Error registering tool: ${ ( error as Error ).message }` );
+			registered.set(tool.name, register(server, tool, dispatch(tool, ctx)));
+		} catch (error) {
+			logger.error('Error registering tool', { error: errorMessage(error) });
 		}
 	}
-	return registeredTools;
+
+	const mgmtCtx: ManagementContext = { ...ctx, reconcile };
+	for (const tool of managementTools) {
+		try {
+			registered.set(tool.name, register(server, tool, dispatch(tool, mgmtCtx)));
+		} catch (error) {
+			logger.error('Error registering tool', { error: errorMessage(error) });
+		}
+	}
+
+	// Extension-gated tools start disabled. They're enabled by reconcile() once
+	// the extension detector confirms the relevant extension is installed on
+	// the active wiki. This avoids a race where tools/list arrives before the
+	// initial reconcile completes.
+	for (const pack of extensionPacks) {
+		for (const tool of pack.tools) {
+			const reg = registered.get(tool.name);
+			if (reg && reg.enabled) {
+				reg.disable();
+			}
+		}
+	}
+
+	return registered;
 }

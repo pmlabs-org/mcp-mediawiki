@@ -1,52 +1,75 @@
 # MediaWiki MCP Server
-[![NPM Version](https://img.shields.io/npm/v/%40professional-wiki%2Fmediawiki-mcp-server?color=red)](https://www.npmjs.com/package/@professional-wiki/mediawiki-mcp-server) [![smithery badge](https://smithery.ai/badge/@ProfessionalWiki/mediawiki-mcp-server)](https://smithery.ai/server/@ProfessionalWiki/mediawiki-mcp-server) [![MIT licensed](https://img.shields.io/npm/l/%40professional-wiki%2Fmediawiki-mcp-server)](./LICENSE)
+[![NPM Version](https://img.shields.io/npm/v/%40professional-wiki%2Fmediawiki-mcp-server?color=red)](https://www.npmjs.com/package/@professional-wiki/mediawiki-mcp-server) [![MIT licensed](https://img.shields.io/npm/l/%40professional-wiki%2Fmediawiki-mcp-server)](./LICENSE)
 
 An MCP (Model Context Protocol) server that enables Large Language Model (LLM) clients to interact with any MediaWiki wiki.
 
-## Feature
+## Features
 
 ### Tools
 
+Every tool that operates on a wiki accepts an optional `wiki` argument naming the wiki to act on (the wiki-management and OAuth tools do not) — pass a wiki key (e.g. `en.wikipedia.org`) or the full `mcp://wikis/{wikiKey}` URI. Omit it to use the configured default wiki (see [Configuration](#configuration)). Each tool response reports the wiki the call ran against.
+
+#### Page reads
+
+| Name | Description |
+|---|---|
+| `compare-pages` | Diff two versions of a wiki page by revision, title, or supplied wikitext. |
+| `get-category-members` | List members of a category (up to 500 per call, paginated via `continueFrom`). |
+| `get-file` | Fetch a file page. |
+| `get-page` | Fetch a wiki page. |
+| `get-page-history` | List recent revisions of a wiki page. |
+| `get-pages` | Fetch multiple wiki pages in one call (up to 50). |
+| `get-recent-changes` | List recent change events across the wiki, filterable by timestamp, namespace, user, tag, type, and hide flags (up to 50 per call, paginated via `continue`). |
+| `get-revision` | Fetch a specific revision of a page. |
+| `list-wikis` | List every configured wiki — its key, sitename, server, whether it is read-only or the default, whether it is reachable, which extension-gated tools work on it, and, for an OAuth-configured wiki, its authorization server. |
+| `parse-wikitext` | Render wikitext to HTML without saving. Returns parse warnings, wikilinks, templates, and external URLs. |
+| `search-page` | Search wiki page titles and contents. |
+| `search-page-by-prefix` | Search page titles by prefix. |
+
+#### Page writes
+
 | Name | Description | Permissions |
 |---|---|---|
-| `add-wiki` | Adds a new wiki as an MCP resource from a URL. | - |
 | `create-page` 🔐 | Create a new wiki page. | `Create, edit, and move pages` |
 | `delete-page` 🔐 | Delete a wiki page. | `Delete pages, revisions, and log entries` |
-| `get-category-members` | Gets all members in the category | - |
-| `get-file` | Returns the standard file object for a file page. | - |
-| `get-page` | Returns the standard page object for a wiki page. | - |
-| `get-page-history` | Returns information about the latest revisions to a wiki page. | - |
-| `get-revision` | Returns the standard revision object for a page. | - |
-| `remove-wiki` | Removes a wiki resource. | - |
-| `search-page` | Search wiki page titles and contents for the provided search terms. | - |
-| `search-page-by-prefix` | Perform a prefix search for page titles. | - |
-| `set-wiki` | Sets the wiki resource to use for the current session. | - |
 | `undelete-page` 🔐 | Undelete a wiki page. | `Delete pages, revisions, and log entries` |
+| `update-file` 🔐 | Upload a new revision of an existing file from local disk. | `Upload, replace, and move files` |
+| `update-file-from-url` 🔐 | Upload a new revision of an existing file from a URL. | `Upload, replace, and move files` |
 | `update-page` 🔐 | Update an existing wiki page. | `Edit existing pages` |
-| `upload-file` 🔐 | Uploads a file to the wiki from the local disk. | `Upload new files` |
-| `upload-file-from-url` 🔐 | Uploads a file to the wiki from a web URL. | `Upload, replace, and move files` |
+| `upload-file` 🔐 | Upload a file to the wiki from local disk. | `Upload new files` |
+| `upload-file-from-url` 🔐 | Upload a file to the wiki from a URL. | `Upload, replace, and move files` |
+
+#### Wiki management
+
+| Name | Description |
+|---|---|
+| `add-wiki` | Add a wiki as an MCP resource from its URL. Disabled when `allowWikiManagement` is `false`. |
+| `remove-wiki` | Remove a wiki resource. Disabled when `allowWikiManagement` is `false` or fewer than two wikis are configured. |
+
+#### OAuth
+
+| Name | Description |
+|---|---|
+| `oauth-logout` | Remove stored OAuth tokens. Stdio only. |
+| `oauth-status` | List stored OAuth tokens with scopes and expiry (no token values). Stdio only. |
+
+#### Extension packs
+
+| Name | Description |
+|---|---|
+| `bucket-query` | Run a [Bucket extension](https://github.com/weirdgloop/mediawiki-extensions-Bucket) Lua query. Enabled only when the wiki has Bucket installed. |
+| `cargo-describe-table` | List the fields of a [Cargo extension](https://www.mediawiki.org/wiki/Extension:Cargo) table with their types and list-flags. Enabled only when the wiki has Cargo installed. |
+| `cargo-list-tables` | List Cargo tables defined on the wiki. Enabled only when the wiki has Cargo installed. |
+| `cargo-query` | Run a [Cargo extension](https://www.mediawiki.org/wiki/Extension:Cargo) SQL-style query. Enabled only when the wiki has Cargo installed. |
+| `smw-list-properties` | List Semantic MediaWiki properties with copy-paste templates for `smw-query`. Enabled only when the wiki has SMW installed. |
+| `smw-query` | Run a Semantic MediaWiki `#ask` query. Enabled only when the wiki has SMW installed. |
 
 ### Resources
 
-`mcp://wikis/{wikiKey}`
-- Credentials (e.g., `token`, `username`, `password`) are never exposed in resource content.
-- After `add-wiki`/`remove-wiki`, the server sends `notifications/resources/list_changed` so clients refresh.
+**`mcp://wikis/{wikiKey}`** — per-wiki resource exposing `sitename`, `server`, `articlepath`, `scriptpath`, and a `private` flag.
 
-<details><summary>Example list result</summary>
-
-```json
-{
-  "resources": [
-    {
-      "uri": "mcp://wikis/en.wikipedia.org",
-      "name": "wikis/en.wikipedia.org",
-      "title": "Wikipedia",
-      "description": "Wiki \"Wikipedia\" hosted at https://en.wikipedia.org"
-    }
-  ]
-}
-```
-</details>
+- Credentials (`token`, `username`, `password`) are never exposed in resource content.
+- After `add-wiki` or `remove-wiki`, the server sends `notifications/resources/list_changed` so clients refresh.
 
 <details><summary>Example read result</summary>
 
@@ -67,16 +90,25 @@ An MCP (Model Context Protocol) server that enables Large Language Model (LLM) c
 | Name | Description | Default |
 |---|---|---|
 | `CONFIG` | Path to your configuration file | `config.json` |
+| `MCP_ALLOW_STATIC_FALLBACK` | Set to `true` to allow HTTP startup when `config.json` has static credentials. See [docs/deployment.md — Shape 2](docs/deployment.md#shape-2--single-wiki-per-user-oauth2-bearer-passthrough). | `unset` |
+| `MCP_CONTENT_MAX_BYTES` | Byte cap for content bodies (wikitext, rendered HTML, diffs). Tune to the target LLM client's tool-response budget. | `50000` |
+| `MCP_LOG_LEVEL` | Minimum severity for logger output. One of `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`, or `silent`. | `debug` |
+| `MCP_OAUTH_CREDENTIALS_FILE` | Override the default credentials store path. Default: `~/.config/mediawiki-mcp/credentials.json` (Linux/macOS) or `%APPDATA%\mediawiki-mcp\credentials.json` (Windows). | `unset` |
+| `MCP_OAUTH_NO_BROWSER` | Set to `1` to skip launching a browser during the OAuth flow; the auth URL is logged to stderr instead. Useful in headless environments. | `unset` |
+| `MCP_PUBLIC_URL` | Override the request-derived public URL used in OAuth protected-resource discovery. Useful for reverse-proxy setups that rewrite the `Host` header. | `unset` |
+| `MCP_MAX_REQUEST_BODY` | Maximum HTTP request body size (StreamableHTTP transport). Accepts size strings like `512kb` or `1mb`. Oversize requests get a JSON-RPC 413. | `1mb` |
+| `MCP_METRICS` | Set to `true` to expose Prometheus metrics at `GET /metrics` on the HTTP transport. | `unset` |
+| `MCP_SESSION_IDLE_TIMEOUT` | Seconds an HTTP session may sit idle before it is closed and removed (StreamableHTTP transport). Any request resets the timer. `0` disables expiry. | `1800` |
+| `MCP_SHUTDOWN_GRACE_MS` | Maximum ms to wait for in-flight `/mcp` calls to drain on `SIGTERM` / `SIGINT`. See [docs/operations.md — Graceful shutdown](docs/operations.md#graceful-shutdown). | `10000` |
 | `MCP_TRANSPORT` | Type of MCP server transport (`stdio` or `http`) | `stdio` |
 | `PORT` | Port used for StreamableHTTP transport | `3000` |
 
 ## Configuration
 
-> **Note:** Config is only required when interacting with a private wiki or using authenticated tools.
+> [!NOTE]
+> Config is only required when interacting with a private wiki or using authenticated tools.
 
 Create a `config.json` file to configure wiki connections. Use the `config.example.json` as a starting point.
-
-### Basic structure
 
 ```json
 {
@@ -86,90 +118,26 @@ Create a `config.json` file to configure wiki connections. Use the `config.examp
       "sitename": "Wikipedia",
       "server": "https://en.wikipedia.org",
       "articlepath": "/wiki",
-      "scriptpath": "/w",
-      "token": null,
-      "username": null,
-      "password": null,
-      "private": false
+      "scriptpath": "/w"
     }
   }
 }
 ```
 
-### Configuration fields
+For the full field reference, env-var substitution, secret sources, change tags, upload directories, and authentication options, see [docs/configuration.md](docs/configuration.md).
 
-| Field | Description |
-|---|---|
-| `defaultWiki` | The default wiki identifier to use (matches a key in `wikis`) |
-| `wikis` | Object containing wiki configurations, keyed by domain/identifier |
+## Authentication
 
-### Wiki configuration fields
+Tools marked 🔐 require authentication. They are also hidden from `tools/list` when the configured default wiki has `readOnly: true` — see [Deployment](#deployment).
 
-| Field | Required | Description |
-|---|---|---|
-| `sitename` | Yes | Display name for the wiki |
-| `server` | Yes | Base URL of the wiki (e.g., `https://en.wikipedia.org`) |
-| `articlepath` | Yes | Path pattern for articles (typically `/wiki`) |
-| `scriptpath` | Yes | Path to MediaWiki scripts (typically `/w`) |
-| `token` | No | OAuth2 access token for authenticated operations (preferred) |
-| `username` | No | Bot username (fallback when OAuth2 is not available) |
-| `password` | No | Bot password (fallback when OAuth2 is not available) |
-| `private` | No | Whether the wiki requires authentication to read (default: `false`) |
+- **Browser-based OAuth (recommended).** Sign in through a browser tab the first time a tool needs auth. Set `oauth2ClientId` and `oauth2CallbackPort` per wiki — see [docs/configuration.md — OAuth (browser-based)](docs/configuration.md#oauth-browser-based).
+- **Per-request bearer token (HTTP).** Each request carries `Authorization: Bearer <token>`; the server forwards it to MediaWiki. See [docs/deployment.md — per-request bearer token](docs/deployment.md#per-request-bearer-token-http-transport).
+- **Manual OAuth2 access token.** Paste a long-lived token into `config.json`. See [docs/configuration.md — manual OAuth2 access token](docs/configuration.md#manual-oauth2-access-token).
+- **Bot password.** Fallback when Extension:OAuth isn't installed. See [docs/configuration.md — bot password](docs/configuration.md#bot-password).
 
-### Environment variable substitution
-
-Config values support `${VAR_NAME}` syntax for referencing environment variables. This allows you to keep secrets out of your `config.json` file.
-
-```json
-{
-  "defaultWiki": "my.wiki.org",
-  "wikis": {
-    "my.wiki.org": {
-      "sitename": "My Wiki",
-      "server": "https://my.wiki.org",
-      "articlepath": "/wiki",
-      "scriptpath": "/w",
-      "token": "${WIKI_OAUTH_TOKEN}",
-      "username": "${WIKI_USERNAME}",
-      "password": "${WIKI_PASSWORD}"
-    }
-  }
-}
-```
-
-If an environment variable is not set, the `${VAR_NAME}` reference is left as-is.
-
-### Authentication setup
-
-For tools marked with 🔐, authentication is required.
-
-**Preferred method: OAuth2 Token**
-
-1. Navigate to `Special:OAuthConsumerRegistration/propose/oauth2` on your wiki
-2. Select "This consumer is for use only by [YourUsername]"
-3. Grant the necessary permissions
-4. After approval, you'll receive:
-   - Client ID
-   - Client Secret
-   - Access Token
-5. Add the `token` to your wiki configuration in `config.json`
-
-> **Note:** OAuth2 requires the [OAuth extension](https://www.mediawiki.org/wiki/Special:MyLanguage/Extension:OAuth) to be installed on the wiki.
-
-**Fallback method: Username & Password**
-
-If OAuth2 is not available on your wiki, you can use bot credentials (from `Special:BotPasswords` ) instead of the OAuth2 token.
+The Cargo tools (`cargo-query`, `cargo-list-tables`, `cargo-describe-table`) call API actions gated by the `runcargoqueries` user right. Most wikis grant this to all users by default; wikis that restrict it require the **`Create, query and delete data through the Cargo extension`** grant on the bot password or OAuth consumer. The Cargo extension is also detected on wiki.gg-hosted wikis (Helldivers, Terraria, Ark, etc.), where it ships under the rebranded name `LIBRARIAN`.
 
 ## Installation
-
-<details><summary><b>Install via Smithery</b></summary>
-
-To install MediaWiki MCP Server for Claude Desktop automatically via [Smithery](https://smithery.ai/server/@ProfessionalWiki/mediawiki-mcp-server):
-
-```bash
-npx -y @smithery/cli install @ProfessionalWiki/mediawiki-mcp-server --client claude
-```
-</details>
 
 <details>
 <summary><b>Install in Claude Desktop</b></summary>
@@ -276,88 +244,41 @@ You should end up with something like the below in your `.claude.json` config:
 ```
 </details>
 
-## Development
+<details>
+<summary><b>Install in Gemini CLI</b></summary>
 
 > 🐋 **Develop with Docker:** Replace the `npm run` part of the command with `make` (e.g. `make inspector`).
 
-
-### [MCP Inspector](https://github.com/modelcontextprotocol/inspector)
-
-Test and debug the MCP server without a MCP client and LLM.
-
-To start the development server and the MCP Inspector together:
-```sh
-npm run inspector
+```bash
+gemini extensions install https://github.com/ProfessionalWiki/MediaWiki-MCP-Server
 ```
 
-The command will build and start the MCP Proxy server locally at `6277` and the MCP Inspector client UI at `http://localhost:6274`.
+This installs the extension from the latest GitHub Release. To pin a specific version, append `--ref=<tag>` (for example `--ref=v0.6.5`).
 
-
-### [MCPJam Inspector](https://github.com/MCPJam/inspector)
-
-Test and debug the MCP server, with a built-in MCP client and support for different LLMs.
-
-To start the development server and the MCP Inspector together:
-```sh
-npm run mcpjam
-```
-
-### Test with MCP clients
-
-To enable your MCP client to use this MediaWiki MCP Server for local development: 
-
-1. [Install](#installation) the MCP server on your MCP client.
-2. Change the `command` and `args` values as shown in the [`mcp.json`](mcp.json) file (or [`mcp.docker.json`](mcp.docker.json) if you prefer to run the MCP server in Docker).
-3. Run the `dev` command so that the source will be compiled whenever there is a change:
-
-	```sh
-	npm run dev
-	```
-
-### Release process
-
-To release a new version:
-
-<details>
-<summary><b>1. Use npm version to create a release</b></summary>
-
-```sh
-# For patch release (0.1.1 → 0.1.2)
-npm version patch
-
-# For minor release (0.1.1 → 0.2.0)
-npm version minor
-
-# For major release (0.1.1 → 1.0.0)
-npm version major
-
-# Or specify exact version
-npm version 0.2.0
-```
-
-This command automatically:
-- Updates `package.json` and `package-lock.json`
-- Syncs the version in `server.json`, `mcpb/manifest.json`, `Dockerfile` (via the version script)
-- Creates a git commit
-- Creates a git tag (e.g., `v0.2.0`)
+See the [Gemini CLI extensions documentation](https://github.com/google-gemini/gemini-cli/tree/main/docs/extensions) for how to update, list, or uninstall extensions.
 </details>
 
-<details>
-<summary><b>2. Push to GitHub</b></summary>
+## Deployment
 
-```sh
-git push origin master --follow-tags
-```
+Running the server as a remote HTTP endpoint for other users has its own configuration requirements — see [docs/deployment.md](docs/deployment.md). A pre-built image is published at `ghcr.io/professionalwiki/mediawiki-mcp-server`. For day-2 operations (logs, `/health`/`/ready`, metrics, graceful shutdown), see [docs/operations.md](docs/operations.md).
 
-The `release` GitHub workflow will trigger automatically:
-- Build a MCP bundle `.mcpb` and publish to [GitHub](https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases)
-- Build and publish to [NPM](https://www.npmjs.com/package/@professional-wiki/mediawiki-mcp-server) 
-- Publish to the [MCP Registry](https://registry.modelcontextprotocol.io/v0/servers?search=io.github.professionalwiki/mediawiki-mcp-server)
-</details>
+## Security
+
+Defaults are safe for single-user use. Before exposing the HTTP transport to others, lock down three things:
+
+- **Trust the proxy, not the header.** The server forwards any `Authorization: Bearer` header straight to MediaWiki — authentication is the reverse proxy's job. Terminate TLS there, and don't expose the MCP port directly on an untrusted network. See [docs/deployment.md — reverse proxy requirements](docs/deployment.md#reverse-proxy-requirements).
+- **Pair `MCP_BIND` with `MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS`.** The HTTP transport binds to `127.0.0.1` by default. When you open it up with `MCP_BIND=0.0.0.0`, set `MCP_ALLOWED_HOSTS` to the hostnames your proxy forwards and `MCP_ALLOWED_ORIGINS` to the browser origins allowed to call the server — these block DNS-rebinding and cross-origin attacks respectively.
+- **Uploads are opt-in.** `upload-file` is disabled until you list allowed directories in `uploadDirs` or `MCP_UPLOAD_DIRS`. See [docs/configuration.md — upload directories](docs/configuration.md#upload-directories).
+
+Report a vulnerability via GitHub's [security advisory form](https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/security/advisories/new) — full policy in [SECURITY.md](SECURITY.md).
 
 ## Contributing
 
-Contributions are welcome! Please feel free to submit a pull request or open an issue for bugs, feature requests, or suggestions.
+Contributions are welcome — pull requests and issues (bugs, feature requests, suggestions) both work.
+
+- **Working on tool code?** Start from [AGENTS.md](AGENTS.md) for repo layout, commands, and testing patterns.
+- **Adding or modifying a tool?** Read [docs/tool-conventions.md](docs/tool-conventions.md) — it covers description voice, parameter docs, annotation hints, and MediaWiki terminology conventions.
+- **Running a release?** See [docs/releasing.md](docs/releasing.md).
 
 ## License
 

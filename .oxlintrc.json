@@ -1,0 +1,35 @@
+{
+	"$schema": "./node_modules/oxlint/configuration_schema.json",
+	"plugins": ["typescript", "node"],
+	"categories": {
+		"correctness": "error",
+		"suspicious": "warn"
+	},
+	"options": {
+		"typeAware": true
+	},
+	"rules": {
+		"no-new": "off",
+		"no-shadow": "off",
+		"no-underscore-dangle": "off",
+		"preserve-caught-error": "off",
+		"typescript/no-floating-promises": "error",
+		"typescript/no-misused-promises": "error",
+		"typescript/await-thenable": "error",
+		"typescript/no-explicit-any": "warn"
+	},
+	"overrides": [
+		{
+			"files": ["scripts/**"],
+			"rules": {
+			}
+		},
+		{
+			"files": ["tests/**"],
+			"rules": {
+				"typescript/no-unsafe-type-assertion": "off",
+				"typescript/no-unnecessary-type-assertion": "off"
+			}
+		}
+	]
+}

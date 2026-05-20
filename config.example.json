@@ -1,4 +1,5 @@
 {
+  "allowWikiManagement": true,
   "defaultWiki": "en.wikipedia.org",
   "wikis": {
     "en.wikipedia.org": {
@@ -19,7 +20,8 @@
       "token": null,
       "username": null,
       "password": null,
-      "private": false
+      "private": false,
+      "tags": null
     }
   }
 }

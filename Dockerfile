@@ -1,5 +1,5 @@
 # ----- Build Stage -----
-FROM node:lts-alpine AS builder
+FROM node:lts-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f AS builder
 WORKDIR /app
 
 # Copy package and configuration
@@ -9,14 +9,19 @@ COPY package.json package-lock.json tsconfig.json ./
 COPY src ./src
 
 # Install dependencies and build
-RUN npm ci && npm run build
+RUN npm ci --ignore-scripts && npm run build
 
 # ----- Production Stage -----
-FROM node:lts-alpine
+FROM node:lts-alpine@sha256:d1b3b4da11eefd5941e7f0b9cf17783fc99d9c6fc34884a665f40a06dbdfc94f
 
-LABEL maintainer="Professional Wiki"
-LABEL org.opencontainers.image.description="Model Context Protocol (MCP) server for MediaWiki"
-LABEL org.opencontainers.image.version="0.6.5"
+ARG GIT_SHA=unknown
+LABEL org.opencontainers.image.title="MediaWiki MCP Server" \
+      org.opencontainers.image.description="Model Context Protocol (MCP) server for MediaWiki" \
+      org.opencontainers.image.authors="Professional Wiki" \
+      org.opencontainers.image.url="https://professional.wiki/en/mediawiki-mcp-server" \
+      org.opencontainers.image.source="https://github.com/ProfessionalWiki/MediaWiki-MCP-Server" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.revision="${GIT_SHA}"
 
 WORKDIR /app
 
@@ -26,8 +31,11 @@ COPY --from=builder /app/dist ./dist
 # Copy package.json and lockfile for production install
 COPY package.json package-lock.json ./
 
+# Copy server.json (loaded at runtime for server name, title, and version)
+COPY server.json ./
+
 # Install only production dependencies
-RUN npm install --production --ignore-scripts
+RUN npm ci --omit=dev --ignore-scripts
 
 # Use a non-root user for security
 RUN addgroup -S nodejs \
@@ -40,6 +48,7 @@ ENV NODE_ENV=production
 # Set environment variables for StreamableHTTP
 ENV PORT=8080
 ENV MCP_TRANSPORT=http
+ENV MCP_BIND=0.0.0.0
 
 # Expose HTTP port
 EXPOSE 8080

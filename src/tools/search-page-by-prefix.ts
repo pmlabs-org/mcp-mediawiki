@@ -1,72 +1,83 @@
 import { z } from 'zod';
-/* eslint-disable n/no-missing-import */
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { ApiQueryAllPagesParams } from 'types-mediawiki-api';
-/* eslint-enable n/no-missing-import */
-import { getMwn } from '../common/mwn.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '../runtime/tool.js';
+import type { ToolContext } from '../runtime/context.js';
+import type { TruncationInfo } from '../results/truncation.js';
 
-export function searchPageByPrefixTool( server: McpServer ): RegisteredTool {
-	return server.tool(
-		'search-page-by-prefix',
-		'Performs a prefix search for page titles.',
-		{
-			prefix: z.string().describe( 'Search prefix' ),
-			limit: z.number().int().min( 1 ).max( 500 ).optional().describe( 'Maximum number of results to return' ),
-			namespace: z.number().int().nonnegative().optional().describe( 'Namespace to search' )
-		},
-		{
-			title: 'Search page by prefix',
-			readOnlyHint: true,
-			destructiveHint: false
-		} as ToolAnnotations,
-		async (
-			{ prefix, limit, namespace }
-		) => handleSearchPageByPrefixTool( prefix, limit, namespace )
-	);
+interface AllPagesEntry {
+	pageid: number;
+	ns: number;
+	title: string;
 }
 
-async function handleSearchPageByPrefixTool(
-	prefix: string, limit?: number, namespace?: number
-): Promise< CallToolResult > {
-	let data: string[];
-	try {
-		const mwn = await getMwn();
-		const options: ApiQueryAllPagesParams = {};
+const inputSchema = {
+	prefix: z.string().describe('Wiki page title prefix'),
+	limit: z
+		.number()
+		.int()
+		.min(1)
+		.max(500)
+		.optional()
+		.describe('Maximum number of results to return'),
+	namespace: z
+		.number()
+		.int()
+		.nonnegative()
+		.optional()
+		.describe('Namespace ID to restrict the search to'),
+} as const;
 
-		if ( limit ) {
-			options.aplimit = limit;
-		}
-		if ( namespace ) {
-			options.apnamespace = namespace;
-		}
+export const searchPageByPrefix: Tool<typeof inputSchema> = {
+	name: 'search-page-by-prefix',
+	description:
+		'Returns wiki page titles beginning with a given prefix (suited to autocomplete and title lookup). Only titles are returned — no snippets, sizes, or IDs. Accepts up to 500 titles per call (default 10); additional matches beyond the cap are flagged in the response. For full-text content search, use search-page.',
+	inputSchema,
+	annotations: {
+		title: 'Search page by prefix',
+		readOnlyHint: true,
+		destructiveHint: false,
+		idempotentHint: true,
+		openWorldHint: true,
+	} as ToolAnnotations,
+	failureVerb: 'retrieve search data',
+	target: (a) => a.prefix,
 
-		data = await mwn.getPagesByPrefix( prefix, options );
-	} catch ( error ) {
-		return {
-			content: [
-				{ type: 'text', text: `Failed to retrieve search data: ${ ( error as Error ).message }` } as TextContent
-			],
-			isError: true
+	async handle({ prefix, limit, namespace }, ctx: ToolContext): Promise<CallToolResult> {
+		const mwn = await ctx.mwn();
+
+		const params: Record<string, string | number | boolean> = {
+			action: 'query',
+			list: 'allpages',
+			apprefix: prefix,
+			formatversion: '2',
 		};
-	}
+		if (limit !== undefined) {
+			params.aplimit = limit;
+		}
+		if (namespace !== undefined) {
+			params.apnamespace = namespace;
+		}
 
-	if ( data.length === 0 ) {
-		return {
-			content: [
-				{ type: 'text', text: `No pages found with the prefix "${ prefix }"` } as TextContent
-			]
-		};
-	}
+		const response = await mwn.request(params);
+		const pages: AllPagesEntry[] = response.query?.allpages ?? [];
 
-	return {
-		content: data.map( getSearchPageByPrefixToolResult )
-	};
-}
+		const truncation: TruncationInfo | null = response.continue
+			? {
+					reason: 'capped-no-continuation',
+					returnedCount: pages.length,
+					limit: limit ?? 10,
+					itemNoun: 'titles',
+					narrowHint: 'narrow the prefix or raise limit (max 500)',
+				}
+			: null;
 
-function getSearchPageByPrefixToolResult( title: string ): TextContent {
-	return {
-		type: 'text',
-		text: title
-	};
-}
+		return ctx.format.ok({
+			results: pages.map((p) => ({
+				title: p.title,
+				pageId: p.pageid,
+				namespace: p.ns,
+			})),
+			...(truncation !== null ? { truncation } : {}),
+		});
+	},
+};

@@ -1,0 +1,566 @@
+#!/usr/bin/env node
+
+import { randomUUID } from 'node:crypto';
+import express, {
+	type ErrorRequestHandler,
+	type RequestHandler,
+	type Request,
+	type Response,
+} from 'express';
+import {
+	hostHeaderValidation,
+	localhostHostValidation,
+} from '@modelcontextprotocol/sdk/server/middleware/hostHeaderValidation.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
+import { evaluateBearerGuard, hasStaticCredentials } from './bearerGuard.js';
+import { LOCALHOST_HOSTS, resolveHttpConfig } from './httpConfig.js';
+import { logger } from '../runtime/logger.js';
+import {
+	getMetricsHandler,
+	initMetrics,
+	isMetricsEnabled,
+	recordReadyFailure,
+	setSessionsProvider,
+} from '../runtime/metrics.js';
+import { withRequestContext } from './requestContext.js';
+
+export { withRequestContext } from './requestContext.js';
+import { loadConfigFromFile, type WikiConfig } from '../config/loadConfig.js';
+import type { MwnProvider } from '../wikis/mwnProvider.js';
+import type { ActiveWiki } from '../wikis/activeWiki.js';
+import type { WikiRegistry } from '../wikis/wikiRegistry.js';
+import { fetchMetadata, type AsMetadata } from '../auth/metadata.js';
+import { buildProtectedResource, resolvePublicBase } from '../auth/protectedResource.js';
+import { createAppState } from '../wikis/state.js';
+import { createServer } from '../server.js';
+import { emitStartupBanner } from '../runtime/banner.js';
+import { createToolContext } from '../runtime/createContext.js';
+import { registerShutdownHandlers, resolveShutdownGrace } from '../runtime/shutdown.js';
+
+export function extractBearerToken(req: Request): string | undefined {
+	const raw = req.headers.authorization;
+	if (typeof raw !== 'string') {
+		return undefined;
+	}
+	const first = raw.split(',')[0].trim();
+	if (!first.toLowerCase().startsWith('bearer ')) {
+		return undefined;
+	}
+	const token = first.slice(7).trim();
+	return token || undefined;
+}
+
+export function resolveMcpHostValidation(
+	host: string,
+	allowedHosts: string[] | undefined,
+): RequestHandler | undefined {
+	if (allowedHosts) {
+		return hostHeaderValidation(allowedHosts);
+	}
+	if (LOCALHOST_HOSTS.includes(host)) {
+		return localhostHostValidation();
+	}
+	if (host === '0.0.0.0' || host === '::') {
+		logger.warning(
+			`Server is binding to ${host} without a Host-header allowlist. ` +
+				'Set MCP_ALLOWED_HOSTS to restrict allowed Host-header values, ' +
+				'or use authentication to protect your server.',
+		);
+	}
+	return undefined;
+}
+
+export type SessionEntry = {
+	readonly transport: StreamableHTTPServerTransport;
+	idleTimer?: ReturnType<typeof setTimeout>;
+	activeRequests: number;
+};
+
+export type SessionRegistry = { [sessionId: string]: SessionEntry };
+
+export interface InFlightCounter {
+	readonly middleware: RequestHandler;
+	readonly count: () => number;
+}
+
+export function createInFlightCounter(): InFlightCounter {
+	let n = 0;
+	const middleware: RequestHandler = (_req, res, next) => {
+		n++;
+		res.on('close', () => {
+			n--;
+		});
+		next();
+	};
+	return { middleware, count: () => n };
+}
+
+// Marks a session as having an in-flight request or open response stream:
+// increments the active-request count and cancels any pending idle expiry.
+// Pair every call with markSessionIdle on the response's 'close' event.
+export function markSessionActive(sessions: SessionRegistry, sessionId: string): void {
+	const entry = sessions[sessionId];
+	if (!entry) {
+		return;
+	}
+	entry.activeRequests += 1;
+	if (entry.idleTimer) {
+		clearTimeout(entry.idleTimer);
+		entry.idleTimer = undefined;
+	}
+}
+
+// Marks one request/stream finished. When the session has no remaining
+// in-flight requests, arms the idle-expiry timer; when it elapses the transport
+// is closed and its onclose handler removes the registry entry. A timeout of 0
+// disables expiry. Because this runs on response 'close', a long-lived GET SSE
+// stream keeps the session active for as long as the client holds it open.
+export function markSessionIdle(
+	sessions: SessionRegistry,
+	sessionId: string,
+	idleTimeoutMs: number,
+): void {
+	const entry = sessions[sessionId];
+	if (!entry) {
+		return;
+	}
+	entry.activeRequests = Math.max(0, entry.activeRequests - 1);
+	if (entry.activeRequests > 0 || idleTimeoutMs <= 0) {
+		return;
+	}
+	if (entry.idleTimer) {
+		clearTimeout(entry.idleTimer);
+	}
+	entry.idleTimer = setTimeout(() => {
+		void sessions[sessionId]?.transport.close();
+	}, idleTimeoutMs);
+	entry.idleTimer.unref();
+}
+
+export function createOAuthProtectedResourceHandler(deps: {
+	wikiRegistry: WikiRegistry;
+}): RequestHandler {
+	return async (req, res, next) => {
+		try {
+			const wikis = deps.wikiRegistry.getAll();
+			const oauthWikis = Object.entries(wikis).filter(
+				([, w]) => typeof w.oauth2ClientId === 'string' && w.oauth2ClientId.trim() !== '',
+			);
+			if (oauthWikis.length === 0) {
+				res.status(404).end();
+				return;
+			}
+			const settled = await Promise.allSettled(
+				oauthWikis.map(([key, cfg]) =>
+					fetchMetadata(key, { server: cfg.server, scriptpath: cfg.scriptpath }),
+				),
+			);
+			const metadatas = settled
+				.filter((r): r is PromiseFulfilledResult<AsMetadata> => r.status === 'fulfilled')
+				.map((r) => r.value);
+			if (metadatas.length === 0) {
+				const reasons = settled
+					.filter((r): r is PromiseRejectedResult => r.status === 'rejected')
+					.map((r) => String(r.reason));
+				logger.warning('OAuth protected-resource discovery failed for all wikis', {
+					reasons,
+				});
+				res.status(503).json({ error: 'discovery_failed' });
+				return;
+			}
+			const protoHeader = req.headers['x-forwarded-proto'];
+			const proto = typeof protoHeader === 'string' ? protoHeader.split(',')[0]?.trim() : undefined;
+			const requestProto =
+				proto === 'https' || proto === 'http' ? proto : req.secure ? 'https' : 'http';
+			const doc = buildProtectedResource({
+				wikis,
+				metadatas,
+				requestHost: req.headers.host ?? undefined,
+				requestProto,
+			});
+			if (!doc) {
+				res.status(404).end();
+				return;
+			}
+			res.json(doc);
+		} catch (err) {
+			next(err);
+		}
+	};
+}
+
+// A wiki needs auth when it is OAuth-only with no usable static fallback.
+function wikiNeedsAuth(cfg: WikiConfig, fallbackAllowed: boolean): boolean {
+	const oauthOnly = typeof cfg.oauth2ClientId === 'string' && cfg.oauth2ClientId.trim() !== '';
+	if (!oauthOnly) {
+		return false;
+	}
+	const hasStatic = hasStaticCredentials(cfg);
+	return !(hasStatic && fallbackAllowed);
+}
+
+export interface McpPostHandlerOptions {
+	allowedOrigins?: string[];
+	wikiRegistry?: WikiRegistry;
+	idleTimeoutMs?: number;
+}
+
+export function createMcpPostHandler(
+	sessions: SessionRegistry,
+	createServerFn: () => ReturnType<typeof createServer>,
+	options: McpPostHandlerOptions = {},
+): RequestHandler {
+	const { allowedOrigins, wikiRegistry, idleTimeoutMs = 0 } = options;
+	return async (req, res) => {
+		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Express headers are string|string[]|undefined; MCP transport sends a single header
+		const sessionId = req.headers['mcp-session-id'] as string | undefined;
+		const bearer = extractBearerToken(req);
+
+		if (!bearer && wikiRegistry) {
+			const all = Object.values(wikiRegistry.getAll());
+			const fallbackAllowed = process.env.MCP_ALLOW_STATIC_FALLBACK === 'true';
+			const allNeedAuth = all.length > 0 && all.every((cfg) => wikiNeedsAuth(cfg, fallbackAllowed));
+			if (allNeedAuth) {
+				const protoHeader = req.headers['x-forwarded-proto'];
+				const proto =
+					typeof protoHeader === 'string' ? protoHeader.split(',')[0]?.trim() : undefined;
+				const requestProto =
+					proto === 'https' || proto === 'http' ? proto : req.secure ? 'https' : 'http';
+				const base = resolvePublicBase(req.headers.host ?? undefined, requestProto);
+				const metadataUrl = `${base}.well-known/oauth-protected-resource`;
+				res.set(
+					'WWW-Authenticate',
+					`Bearer realm="MediaWiki MCP Server", resource_metadata="${metadataUrl}"`,
+				);
+				res.status(401).json({
+					jsonrpc: '2.0',
+					error: {
+						code: -32001,
+						message: 'Authentication required. See WWW-Authenticate header.',
+					},
+					id: null,
+				});
+				return;
+			}
+		}
+		let transport: StreamableHTTPServerTransport;
+
+		if (sessionId && sessions[sessionId]) {
+			transport = sessions[sessionId].transport;
+			// Existing session: the registry entry already exists, so count this
+			// request now and release it when the response closes.
+			markSessionActive(sessions, sessionId);
+		} else if (!sessionId && isInitializeRequest(req.body)) {
+			transport = new StreamableHTTPServerTransport({
+				sessionIdGenerator: () => randomUUID(),
+				// The SDK transport's Origin check is gated behind this flag.
+				// Host-header validation stays in Express middleware upstream, so
+				// we don't pass allowedHosts here (that inner check no-ops when
+				// _allowedHosts is undefined, regardless of the flag).
+				enableDnsRebindingProtection: allowedOrigins !== undefined,
+				allowedOrigins,
+				// onsessioninitialized fires during handleRequest below — the only
+				// point where the registry entry and transport.sessionId both
+				// exist. Seed activeRequests to 1 so the init POST counts as
+				// in-flight; the res.on('close') handler registered after
+				// handleRequest releases it.
+				onsessioninitialized: (newSessionId) => {
+					sessions[newSessionId] = { transport, activeRequests: 1 };
+				},
+			});
+
+			transport.onclose = () => {
+				if (transport.sessionId) {
+					const entry = sessions[transport.sessionId];
+					if (entry?.idleTimer) {
+						clearTimeout(entry.idleTimer);
+					}
+					delete sessions[transport.sessionId];
+				}
+			};
+			const server = await createServerFn();
+
+			await server.connect(transport);
+		} else {
+			res.status(400).json({
+				jsonrpc: '2.0',
+				error: {
+					code: -32000,
+					message: 'Bad Request: No valid session ID provided',
+				},
+				id: null,
+			});
+			return;
+		}
+
+		// Release the in-flight count when this response closes. transport.sessionId
+		// is populated by now for both branches (set synchronously during
+		// handleRequest for a new session). Registered before handleRequest so the
+		// 'close' listener is in place even if the response finishes synchronously.
+		res.on('close', () => {
+			const sid = transport.sessionId;
+			if (sid) {
+				markSessionIdle(sessions, sid, idleTimeoutMs);
+			}
+		});
+
+		await withRequestContext(bearer, transport.sessionId, () =>
+			transport.handleRequest(req, res, req.body),
+		);
+	};
+}
+
+export function createSessionRequestHandler(
+	sessions: SessionRegistry,
+	idleTimeoutMs = 0,
+): RequestHandler {
+	return async (req, res) => {
+		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- Express headers are string|string[]|undefined; MCP transport sends a single header
+		const sessionId = req.headers['mcp-session-id'] as string | undefined;
+		if (!sessionId || !sessions[sessionId]) {
+			res.status(400).send('Invalid or missing session ID');
+			return;
+		}
+		// A held-open GET SSE stream stays counted as active until it closes, so
+		// markSessionIdle (and the idle timer) won't run while a client holds it.
+		markSessionActive(sessions, sessionId);
+		res.on('close', () => markSessionIdle(sessions, sessionId, idleTimeoutMs));
+
+		const entry = sessions[sessionId];
+		// The session id (a 122-bit randomUUID) is itself the session capability:
+		// possession of a valid one authorizes GET/DELETE, with no bearer check.
+		// That is safe because every POST self-authenticates with its own per-
+		// request bearer (results return on that POST's own HTTP response), and
+		// the standalone GET SSE stream carries only global, non-client-specific
+		// notifications — so a session id alone grants nothing sensitive.
+		// The bearer is still extracted to thread into withRequestContext for
+		// consistency with the POST path.
+		const bearer = extractBearerToken(req);
+		await withRequestContext(bearer, sessionId, () => entry.transport.handleRequest(req, res));
+	};
+}
+
+// body-parser raises a PayloadTooLargeError with `type === 'entity.too.large'`
+// when the request body exceeds the configured limit. Without this handler the
+// default Express error page returns an HTML blob, which an MCP client cannot
+// parse — so we shape it as a JSON-RPC error.
+export function payloadTooLargeHandler(limit: string): ErrorRequestHandler {
+	return (err, _req, res, next) => {
+		const tooLarge =
+			typeof err === 'object' &&
+			err !== null &&
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- predicate body's required cast to inspect body-parser PayloadTooLargeError
+			(err as { type?: unknown }).type === 'entity.too.large';
+		if (!tooLarge) {
+			next(err);
+			return;
+		}
+		res.status(413).json({
+			jsonrpc: '2.0',
+			error: {
+				code: -32000,
+				message: `Request body exceeds the configured maximum size of ${limit}`,
+			},
+			id: null,
+		});
+	};
+}
+
+interface ReadyCacheEntry {
+	expiresAt: number;
+	payload: { status: 'ready' | 'not_ready'; wiki: string; reason?: string; checked_at: string };
+	httpStatus: 200 | 503;
+}
+
+const READY_CACHE_TTL_MS = 5_000;
+const READY_PROBE_TIMEOUT_MS = 3_000;
+let readyCache: ReadyCacheEntry | null = null;
+
+export function __resetReadyCacheForTesting(): void {
+	readyCache = null;
+}
+
+async function probeDefaultWiki(
+	activeWiki: ActiveWiki,
+	mwnProvider: MwnProvider,
+): Promise<ReadyCacheEntry> {
+	const wiki = activeWiki.getDefaultKey();
+	const checkedAt = new Date().toISOString();
+	let timer: ReturnType<typeof setTimeout> | undefined;
+	const timeout = new Promise<never>((_, reject) => {
+		timer = setTimeout(
+			() => reject(new Error('probe timeout after 3000ms')),
+			READY_PROBE_TIMEOUT_MS,
+		);
+	});
+
+	try {
+		const mwn = await mwnProvider.get();
+		await Promise.race([
+			mwn.request({
+				action: 'query',
+				meta: 'siteinfo',
+				format: 'json',
+				siprop: 'general',
+			}),
+			timeout,
+		]);
+		return {
+			expiresAt: Date.now() + READY_CACHE_TTL_MS,
+			payload: { status: 'ready', wiki, checked_at: checkedAt },
+			httpStatus: 200,
+		};
+	} catch (err) {
+		const reason = err instanceof Error ? err.message : String(err);
+		return {
+			expiresAt: Date.now() + READY_CACHE_TTL_MS,
+			payload: { status: 'not_ready', wiki, reason, checked_at: checkedAt },
+			httpStatus: 503,
+		};
+	} finally {
+		if (timer) {
+			clearTimeout(timer);
+		}
+	}
+}
+
+// Test seam: exported so the timeout test can call the probe directly,
+// bypassing supertest's lazy request sending under vi.useFakeTimers.
+export const __probeDefaultWikiForTesting = probeDefaultWiki;
+
+export function mountMetricsEndpoint(app: express.Express): void {
+	if (!isMetricsEnabled()) {
+		return;
+	}
+	initMetrics();
+	const handler = getMetricsHandler();
+	if (handler) {
+		app.get('/metrics', handler);
+	}
+}
+
+export function mountReadyEndpoint(
+	app: express.Express,
+	deps: {
+		activeWiki: ActiveWiki;
+		mwnProvider: MwnProvider;
+	},
+): void {
+	app.get('/ready', async (_req, res) => {
+		if (!readyCache || Date.now() >= readyCache.expiresAt) {
+			readyCache = await probeDefaultWiki(deps.activeWiki, deps.mwnProvider);
+			// Count distinct probe failures, not cached replays — K8s readiness
+			// probes that fire every second would otherwise inflate the counter
+			// 5x against a 5s cache for the same underlying outage.
+			if (readyCache.httpStatus !== 200) {
+				recordReadyFailure();
+			}
+		}
+		res.status(readyCache.httpStatus).json(readyCache.payload);
+	});
+}
+
+// Wiki config must load before HTTP config so evaluateBearerGuard below
+// can inspect wikiRegistry.getAll() to decide whether static credentials
+// are configured. resolveHttpConfig() reads only env vars and is order-
+// independent — placed after for visual grouping with the HTTP setup.
+const config = loadConfigFromFile();
+const state = createAppState(config);
+const { host, port, allowedHosts, allowedOrigins, maxRequestBody, sessionIdleTimeoutMs, warnings } =
+	resolveHttpConfig();
+const guard = evaluateBearerGuard(state.wikiRegistry.getAll(), process.env);
+if (guard.kind === 'block') {
+	logger.error(
+		'HTTP transport refuses to start because static credentials are configured for wiki(s): ' +
+			guard.wikis.join(', ') +
+			'.\n' +
+			'A request without an Authorization header would silently act as the configured identity, ' +
+			'defeating per-caller bearer passthrough.\n' +
+			'Remove `token`, `username`, and `password` from these wikis in config.json, ' +
+			'or set MCP_ALLOW_STATIC_FALLBACK=true to acknowledge the shared-identity deployment shape.',
+	);
+	process.exit(1);
+}
+if (guard.kind === 'override') {
+	logger.warning(
+		'MCP_ALLOW_STATIC_FALLBACK=true is set. Wiki(s) with static credentials: ' +
+			guard.wikis.join(', ') +
+			'. ' +
+			'Requests without an Authorization header will act as the configured identity. ' +
+			'This deployment cannot attribute writes to individual callers.',
+	);
+}
+for (const warning of warnings) {
+	logger.warning(warning);
+}
+emitStartupBanner(
+	{ transport: 'http', http: { host, port, allowedHosts, allowedOrigins, maxRequestBody } },
+	{
+		wikiRegistry: state.wikiRegistry,
+		activeWiki: state.activeWiki,
+		uploadDirs: state.uploadDirs,
+	},
+);
+
+const app = express();
+app.use(express.json({ limit: maxRequestBody }));
+app.use(payloadTooLargeHandler(maxRequestBody));
+
+const hostValidation = resolveMcpHostValidation(host, allowedHosts);
+if (hostValidation) {
+	app.use('/mcp', hostValidation);
+}
+
+if ((host === '0.0.0.0' || host === '::') && !allowedOrigins) {
+	logger.warning(
+		`Server is binding to ${host} without an Origin allowlist. ` +
+			'Set MCP_ALLOWED_ORIGINS to restrict allowed Origin-header values, ' +
+			'or front the server with a reverse proxy that enforces Origin.',
+	);
+}
+
+const sessions: SessionRegistry = {};
+const sessionRequestHandler = createSessionRequestHandler(sessions, sessionIdleTimeoutMs);
+const ctx = createToolContext({ logger, state, transport: 'http' });
+
+const inFlight = createInFlightCounter();
+app.use('/mcp', inFlight.middleware);
+
+app.post(
+	'/mcp',
+	createMcpPostHandler(sessions, () => createServer(ctx), {
+		allowedOrigins,
+		wikiRegistry: state.wikiRegistry,
+		idleTimeoutMs: sessionIdleTimeoutMs,
+	}),
+);
+app.get('/mcp', sessionRequestHandler);
+app.delete('/mcp', sessionRequestHandler);
+
+app.get('/health', (_req: Request, res: Response) => {
+	res.status(200).json({ status: 'ok' });
+});
+
+app.get(
+	'/.well-known/oauth-protected-resource',
+	createOAuthProtectedResourceHandler({
+		wikiRegistry: state.wikiRegistry,
+	}),
+);
+
+mountReadyEndpoint(app, { activeWiki: state.activeWiki, mwnProvider: state.mwnProvider });
+mountMetricsEndpoint(app);
+setSessionsProvider(() => Object.keys(sessions).length);
+
+const httpServer = app.listen(port, host, () => {
+	logger.info(`MCP Streamable HTTP Server listening on ${host}:${port}`);
+});
+
+registerShutdownHandlers({
+	transport: 'http',
+	graceMs: resolveShutdownGrace(process.env),
+	httpServer,
+	sessions,
+	inFlight,
+});

@@ -1,72 +1,61 @@
 import { z } from 'zod';
-/* eslint-disable n/no-missing-import */
-import type { McpServer, RegisteredTool } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { CallToolResult, TextContent, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-/* eslint-enable n/no-missing-import */
-import { wikiService } from '../common/wikiService.js';
-import { clearMwnCache } from '../common/mwn.js';
-import { parseWikiResourceUri, InvalidWikiResourceUriError } from '../common/wikiResource.js';
+import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { Tool } from '../runtime/tool.js';
+import type { ManagementContext } from '../runtime/context.js';
+import { parseWikiResourceUri, InvalidWikiResourceUriError } from '../wikis/wikiResource.js';
 
-export function removeWikiTool( server: McpServer ): RegisteredTool {
-	return server.tool(
-		'remove-wiki',
-		'Removes a wiki from the MCP resources.',
-		{
-			uri: z.string().describe( 'MCP resource URI of the wiki to remove (e.g. mcp://wikis/en.wikipedia.org)' )
-		},
-		{
-			title: 'Remove wiki',
-			destructiveHint: true
-		} as ToolAnnotations,
-		( { uri } ) => handleRemoveWikiTool( server, uri )
-	);
-}
+const inputSchema = {
+	uri: z
+		.string()
+		.describe('MCP resource URI of the wiki to remove (e.g. mcp://wikis/en.wikipedia.org)'),
+} as const;
 
-async function handleRemoveWikiTool( server: McpServer, uri: string ): Promise<CallToolResult> {
-	try {
-		const { wikiKey } = parseWikiResourceUri( uri );
+export const removeWiki: Tool<typeof inputSchema, ManagementContext> = {
+	name: 'remove-wiki',
+	wikiScoped: false,
+	description:
+		'Removes a wiki from the MCP resources. Clears any cached credentials and license metadata for the wiki. Fails if the specified wiki is the configured default wiki.',
+	inputSchema,
+	annotations: {
+		title: 'Remove wiki',
+		readOnlyHint: false,
+		destructiveHint: true,
+		idempotentHint: true,
+		openWorldHint: false,
+	} as ToolAnnotations,
+	failureVerb: 'remove wiki',
+	target: (a) => a.uri,
 
-		const wikiToRemove = wikiService.get( wikiKey );
-		if ( !wikiToRemove ) {
-			return {
-				content: [ {
-					type: 'text',
-					text: `mcp://wikis/${ wikiKey } not found in MCP resources.`
-				} as TextContent ],
-				isError: true
-			};
+	async handle({ uri }, ctx: ManagementContext): Promise<CallToolResult> {
+		let wikiKey: string;
+		try {
+			({ wikiKey } = parseWikiResourceUri(uri));
+		} catch (error) {
+			if (error instanceof InvalidWikiResourceUriError) {
+				return ctx.format.invalidInput(error.message);
+			}
+			throw error;
 		}
 
-		if ( wikiService.getCurrent().key === wikiKey ) {
-			return {
-				content: [ {
-					type: 'text',
-					text: 'Cannot remove the currently active wiki. Please set a different wiki as the active wiki before removing this one.'
-				} as TextContent ],
-				isError: true
-			};
+		const wikiToRemove = ctx.wikis.get(wikiKey);
+		if (!wikiToRemove) {
+			return ctx.format.invalidInput(`mcp://wikis/${wikiKey} not found in MCP resources`);
 		}
 
-		wikiService.remove( wikiKey );
-		server.sendResourceListChanged();
-		clearMwnCache();
-
-		return {
-			content: [ {
-				type: 'text',
-				text: `${ wikiToRemove.sitename } (mcp://wikis/${ wikiKey }) has been removed from MCP resources.`
-			} as TextContent ]
-		};
-	} catch ( error ) {
-		if ( error instanceof InvalidWikiResourceUriError ) {
-			return {
-				content: [ {
-					type: 'text',
-					text: error.message
-				} as TextContent ],
-				isError: true
-			};
+		if (ctx.activeWiki.getDefaultKey() === wikiKey) {
+			return ctx.format.conflict(
+				'Cannot remove the configured default wiki. Change the default wiki in the server configuration before removing this one.',
+			);
 		}
-		throw error;
-	}
-}
+
+		ctx.wikis.remove(wikiKey);
+		ctx.wikiCache.invalidate(wikiKey);
+		await ctx.reconcile();
+
+		return ctx.format.ok({
+			wikiKey,
+			sitename: wikiToRemove.sitename,
+			removed: true as const,
+		});
+	},
+};
