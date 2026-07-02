@@ -1,0 +1,5 @@
+# .fork-sync-ignore — upstream commits fork-sync must skip.
+# One SHA per line, optional reason after whitespace.
+# Blank lines and # comments allowed.
+
+d9932fddb3f5867afe38d2cea86a7864b8f12bd7  # Bump actions/checkout v6→v7 — irrelevant; Pathfinder's ci.yml is a full replacement using @v4 with its own build/deploy pipeline
