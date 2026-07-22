@@ -22,6 +22,7 @@ Covers configuration topics beyond the basic `config.json` shape documented in [
 | `articlepath` | Yes | Path pattern for articles (typically `/wiki`) |
 | `scriptpath` | Yes | Path to MediaWiki scripts (typically `/w`) |
 | `oauth2ClientId` | No | Client key your wiki admin gives you when they register the MCP server's OAuth consumer. Opts the wiki into browser-based sign-in. See [OAuth (browser-based)](#oauth-browser-based). |
+| `oauth2ClientSecret` | No | Client secret for the **confidential** OAuth consumer used by the [hosted OAuth proxy](deployment.md#hosted-oauth-sign-in); required when that proxy is enabled. |
 | `oauth2CallbackPort` | No | Loopback port for the OAuth sign-in callback. Use the same port number your admin set in the consumer's callback URL. |
 | `token` | No | OAuth2 access token for authenticated operations (manual token alternative to `oauth2ClientId`) |
 | `username` | No | Bot username (fallback when OAuth2 is not available) |
@@ -186,7 +187,6 @@ Over the HTTP transport, OAuth runs through discovery and `401` challenges inste
 #### Hosted OAuth proxy environment variables
 
 Setting `MCP_PUBLIC_URL` and `MCP_OAUTH_JWT_SIGNING_KEY` on the HTTP transport turns the server into an OAuth Authorization Server in front of one MediaWiki consumer, so OAuth-aware MCP clients sign in with no manual token handling. The variables and setup steps are in [deployment.md — hosted OAuth sign-in](deployment.md#hosted-oauth-sign-in).
-
 ### For wiki admins: registering the OAuth consumer
 
 The MCP server needs one OAuth 2.0 consumer per wiki. Registration requires Extension:OAuth (1.0 or later, included with MediaWiki 1.39+) and the `mwoauthproposeconsumer` user right.

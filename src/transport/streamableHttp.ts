@@ -270,6 +270,7 @@ export async function resolveUpstreamBearer(
 			tokenEndpoint: `${pc.tokenExchangeBase}${pc.scriptpath}/rest.php/oauth2/access_token`,
 			refreshToken: upstream.refreshToken,
 			clientId: pc.upstreamClientId,
+			clientSecret: pc.upstreamClientSecret,
 		});
 		const updated = {
 			accessToken: r.access_token,
