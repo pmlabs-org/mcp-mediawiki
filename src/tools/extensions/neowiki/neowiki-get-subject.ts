@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../../../runtime/tool.js';
-import type { ToolContext } from '../../../runtime/context.js';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../../../runtime/tool.ts';
+import type { ToolContext } from '../../../runtime/context.ts';
+import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
 
 const inputSchema = {
 	id: z
@@ -14,7 +14,7 @@ const inputSchema = {
 } as const;
 
 interface SubjectStatement {
-	type?: string;
+	propertyType?: string;
 	value?: unknown;
 }
 
@@ -41,7 +41,7 @@ export const neowikiGetSubject: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'get NeoWiki subject',
 	target: (a) => a.id,
 
@@ -77,7 +77,7 @@ export function flattenSubject(
 } {
 	const statements = Object.entries(subject.statements ?? {}).map(([property, statement]) => ({
 		property,
-		type: typeof statement.type === 'string' ? statement.type : '',
+		type: typeof statement.propertyType === 'string' ? statement.propertyType : '',
 		value: statement.value,
 	}));
 	return {

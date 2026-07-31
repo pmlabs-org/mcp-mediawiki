@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../../../runtime/tool.js';
-import type { ToolContext } from '../../../runtime/context.js';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../../../runtime/tool.ts';
+import type { ToolContext } from '../../../runtime/context.ts';
+import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
 
 const inputSchema = {
 	id: z
@@ -23,7 +23,7 @@ export const neowikiDeleteSubject: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'delete NeoWiki subject',
 	target: (a) => a.id,
 

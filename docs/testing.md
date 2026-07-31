@@ -7,16 +7,16 @@ Reference for unit tests, integration testing against a real wiki, and the local
 
 ## Unit tests
 
-Tests use [Vitest](https://vitest.dev/). Each tool exports a `Tool<TSchema>` descriptor from `src/tools/<name>.ts`; tests import the descriptor and route through `dispatch( descriptor, ctx )` from `src/runtime/dispatcher.js`.
+Tests use [Vitest](https://vitest.dev/). Each tool exports a `Tool<TSchema>` descriptor from `src/tools/<name>.ts`; tests import the descriptor and route through `dispatch( descriptor, ctx )` from `src/runtime/dispatcher.ts`.
 
 Build a `ToolContext` per test via `fakeContext()` from `tests/helpers/fakeContext.ts`. Override only the slices the test exercises — by default unstubbed methods throw, so tests fail loudly when they reach for something they didn't mean to:
 
 ```typescript
 import { describe, it, expect, vi } from 'vitest';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { createMockMwn } from '../helpers/mock-mwn.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { getPage } from '../../src/tools/get-page.js';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { createMockMwn } from '../helpers/mock-mwn.ts';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { getPage } from '../../src/tools/get-page.ts';
 
 it( 'returns page source', async () => {
 	const mwn = createMockMwn( { read: vi.fn().mockResolvedValue( /* … */ ) } );
@@ -37,11 +37,19 @@ Happy-path tests typically call `descriptor.handle( args, ctx )` directly. Error
 
 Use `createMockMwn()` from `tests/helpers/mock-mwn.ts` to create mock `mwn` instances with method overrides. See existing test files under `tests/tools/` for the full pattern.
 
+Reach for a shared fixture rather than spelling a literal out. A field added to the real type then breaks in one place, instead of drifting silently through every suite that happened to write the literal by hand:
+
+- `fakeLogger()` — a `Logger` double covering all eight levels.
+- `fakeProxyConfig()` — a complete `ProxyConfig`.
+- `mockedLookupAll()` — the `node:dns/promises` `lookup` mock, typed at the `{ all: true }` overload production calls.
+- `toolArgs( tool, partial )` — runs partial input through a tool's own schema, so `.default()` values arrive the way a real call delivers them.
+
 Run:
 
 ```sh
 npm test           # one-shot
 npm run test:watch # watch mode
+npm run typecheck  # tsc over src + tests
 ```
 
 ## MCP Inspector (UI)
@@ -91,7 +99,29 @@ Pass an optional `wiki` argument (a wiki key such as `en.wikipedia.org`, or the 
 To point an MCP client at a locally-built copy of the server:
 
 1. [Install](../README.md#installation) the server on the client.
-2. Replace the `command` and `args` values with the ones from [`mcp.json`](../mcp.json) (or [`mcp.docker.json`](../mcp.docker.json) for Docker).
+2. Replace the `command` and `args` values with:
+
+   ```json
+   "command": "node",
+   "args": ["/path/to/MediaWiki-MCP-Server/dist/index.js"]
+   ```
+
+   Or, to run the server in Docker:
+
+   ```json
+   "command": "docker",
+   "args": [
+     "run", "-i", "--rm",
+     "-v", "/path/to/MediaWiki-MCP-Server/:/home/node/app",
+     "-w", "/home/node/app",
+     "-u", "node",
+     "node:22",
+     "npm", "run", "start", "--silent"
+   ]
+   ```
+
+   The Docker variant mounts the repository at `/home/node/app`, so point `CONFIG` at a path inside the container.
+
 3. Run the `dev` command so sources recompile on save:
 
    ```sh
@@ -100,12 +130,13 @@ To point an MCP client at a locally-built copy of the server:
 
 ## Local wiki setup (for authenticated tools)
 
-Authenticated tools (create, update, delete, undelete, upload) need credentials. To create bot passwords on a local MediaWiki running in Docker:
+Authenticated tools (create, update, delete, undelete, upload) need credentials.
+To create a bot password on a local MediaWiki running in Docker:
 
 ```bash
-docker exec <container> php /var/www/html/w/maintenance/run.php createBotPassword \
+docker exec <container> php /var/www/html/maintenance/run.php createBotPassword \
   --appid mcp-server \
-  --grants 'basic,editpage,editprotected,createeditmovepage,uploadfile,highvolume,delete' \
+  --grants 'basic,highvolume,editpage,editprotected,createeditmovepage,delete,uploadfile,uploadeditmovefile' \
   <username>
 ```
 
@@ -117,8 +148,8 @@ file:
 
 ```json
 {
-  "username": "<username>@mcp-server",
-  "password": "<generated-password>"
+  "username": "${MW_BOT_USER}",
+  "password": "${MW_BOT_PASSWORD}"
 }
 ```
 
@@ -136,13 +167,20 @@ Extension:OAuth works.
 ### 1. Prerequisites and the environment contract
 
 You need a reachable MediaWiki container with **Extension:OAuth installed and
-OAuth2 enabled** (OAuth2 signing keys configured on the wiki), a known admin
-account, and a local build of this repo (`npm run build`). Any environment that
-satisfies the contract below works.
+OAuth2 enabled**, a known admin account, and a local build of this repo
+(`npm run build`). Any environment that satisfies the contract below works.
+
+Installing Extension:OAuth is not enough to issue OAuth2 tokens. The wiki also
+needs `$wgOAuth2PrivateKey` and `$wgOAuth2PublicKey` set, the admin account needs
+an email address, and that account needs `mwoauthproposeconsumer` and
+`mwoauthmanageconsumer` — rights Extension:OAuth grants to no group by default.
+The provisioning script checks all three and prints the fix for whatever is
+missing, so run it first and let it tell you.
 
 | Variable | Meaning | Source |
 |---|---|---|
 | `OAUTH2_CLIENT_ID` | Consumer key → `config.json` `oauth2ClientId` | provisioning script |
+| `MCP_OAUTH2_CLIENT_SECRET` | Consumer secret. The proxy refuses to start without it | provisioning script |
 | `MW_DEV_BOT_USER` / `MW_DEV_BOT_PASSWORD` | Static credentials for non-proxy auth tests | provisioning script |
 | `MCP_TRUSTED_HOSTS` | Outbound SSRF-guard exemption for a loopback/private wiki | provisioning script |
 | `MCP_PUBLIC_URL`, `MCP_OAUTH_JWT_SIGNING_KEY`, `PORT`, `MCP_TRANSPORT` | Proxy configuration | you |
@@ -155,18 +193,25 @@ set -a; eval "$( scripts/provision-dev-wiki.sh <container> )"; set +a
 ```
 
 On a wiki whose Extension:OAuth is recent enough to register OAuth2 consumers
-from the command line, this registers an approved OAuth 2.0 public (PKCE)
+from the command line, this registers an approved **confidential** OAuth 2.0
 consumer whose callback matches `${MCP_PUBLIC_URL}/oauth/callback`, creates a bot
-password, and exports `OAUTH2_CLIENT_ID`, `MW_DEV_BOT_USER`, `MW_DEV_BOT_PASSWORD`,
-and (for a loopback wiki) `MCP_TRUSTED_HOSTS`. Override the proxy base with
-`--public-url` if you run the server on a non-default port.
+password, and exports `OAUTH2_CLIENT_ID`, `MCP_OAUTH2_CLIENT_SECRET`,
+`MW_DEV_BOT_USER`, `MW_DEV_BOT_PASSWORD`, and (for a loopback wiki)
+`MCP_TRUSTED_HOSTS`. Override the proxy base with `--public-url` if you run the
+server on a non-default port, and the install path with `--mw-path` if MediaWiki
+does not live at `/var/www/html` — MediaWiki core's own docker environment puts
+it at `/var/www/html/w`.
+
+The consumer must be confidential: the proxy authenticates with the secret to
+refresh upstream tokens, and refuses to start without one.
 
 On an older Extension:OAuth — for example the copy bundled with the MediaWiki
 1.43 LTS, whose `createOAuthConsumer.php` is OAuth1-only — the script cannot
 register the consumer from the command line. It prints step-by-step instructions
 to register it once in the browser at
 `Special:OAuthConsumerRegistration/propose/oauth2`, after which you set
-`OAUTH2_CLIENT_ID` yourself before starting the proxy.
+`OAUTH2_CLIENT_ID` and `MCP_OAUTH2_CLIENT_SECRET` yourself before starting the
+proxy. Tick "Client is confidential" there; the secret is shown once.
 
 ### 3. Configure the wiki entry
 
@@ -182,7 +227,8 @@ In `config.json`, point the wiki at the provisioned consumer (adjust
       "server": "http://localhost:8080",
       "articlepath": "/wiki",
       "scriptpath": "/w",
-      "oauth2ClientId": "${OAUTH2_CLIENT_ID}"
+      "oauth2ClientId": "${OAUTH2_CLIENT_ID}",
+      "oauth2ClientSecret": "${MCP_OAUTH2_CLIENT_SECRET}"
     }
   }
 }
@@ -196,8 +242,8 @@ export MCP_OAUTH_JWT_SIGNING_KEY="$(openssl rand -hex 32)"   # keep this FIXED a
 node dist/index.js
 ```
 
-`MCP_TRUSTED_HOSTS` (from step 2) is already exported for a loopback wiki. A
-changed signing key invalidates every issued token.
+`MCP_TRUSTED_HOSTS` and `MCP_OAUTH2_CLIENT_SECRET` (from step 2) are already
+exported. A changed signing key invalidates every issued token.
 
 ### 5. Walk the sign-in flow
 

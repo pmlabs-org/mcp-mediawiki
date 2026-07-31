@@ -1,8 +1,8 @@
 import { describe, it, expect } from 'vitest';
-import { checkWikiCapability } from '../../src/runtime/wikiCapability.js';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { withRequestFields } from '../../src/transport/requestContext.js';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.js';
+import { checkWikiCapability } from '../../src/runtime/wikiCapability.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { withRequestFields } from '../../src/runtime/requestContext.ts';
+import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
 
 const PROXY = {
 	issuer: 'https://mcp.example/mcp',
@@ -88,6 +88,6 @@ describe('checkWikiCapability proxy step-up', () => {
 		// read tool — proving the step-up only loosens behavior when the proxy is on.
 		const result = await checkWikiCapability('get-page', 'w', ctx({ proxy: false }));
 		expect(result?.isError).toBe(true);
-		expect(messageOf(result)).toContain('requires OAuth');
+		expect(messageOf(result)).toContain('requires an authenticated user');
 	});
 });

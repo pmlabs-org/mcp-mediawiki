@@ -1,14 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createMockMwn } from '../helpers/mock-mwn.js';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { getPages, BatchContentFormat } from '../../src/tools/get-pages.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { SectionServiceImpl } from '../../src/services/sectionService.js';
+import { createMockMwn } from '../helpers/mock-mwn.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { getPages, BatchContentFormat } from '../../src/tools/get-pages.ts';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { SectionServiceImpl } from '../../src/services/sectionService.ts';
 import {
 	assertStructuredData,
 	assertStructuredError,
 	assertStructuredSuccess,
-} from '../helpers/structuredResult.js';
+} from '../helpers/structuredResult.ts';
 
 function massQueryPage(title: string, pageid: number, revid: number, content?: string) {
 	return {
@@ -563,7 +563,10 @@ describe('get-pages', () => {
 
 			const text = assertStructuredSuccess(result);
 			// No requestedTitle when title equals the requested title; first field is pageId.
-			expect(text).toMatch(/Page ID: 1[\s\S]*?Source:\n\nx{50000}\n {2}Truncation:/);
+			// The blank line after the source is what separates it from the next field:
+			// without it the wikitext runs straight into `Truncation:`, and a page whose
+			// own text contains such a line would read as a field of this payload.
+			expect(text).toMatch(/Page ID: 1[\s\S]*?Source:\n\nx{50000}\n\n {2}Truncation:/);
 			expect(text).toContain('    Reason: content-truncated');
 			expect(text).toContain('    Returned bytes: 50000');
 			expect(text).toContain('    Total bytes: 50001');

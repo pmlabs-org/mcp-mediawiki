@@ -1,10 +1,11 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { createMockMwn } from '../helpers/mock-mwn.js';
-import { fakeContext } from '../helpers/fakeContext.js';
+import type { Mock } from 'vitest';
+import { createMockMwn } from '../helpers/mock-mwn.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
 
-vi.mock('../../src/transport/uploadGuard.js', async () => {
-	const actual = await vi.importActual<typeof import('../../src/transport/uploadGuard.js')>(
-		'../../src/transport/uploadGuard.js',
+vi.mock('../../src/transport/uploadGuard.ts', async () => {
+	const actual = await vi.importActual<typeof import('../../src/transport/uploadGuard.ts')>(
+		'../../src/transport/uploadGuard.ts',
 	);
 	return {
 		...actual,
@@ -12,9 +13,9 @@ vi.mock('../../src/transport/uploadGuard.js', async () => {
 	};
 });
 
-vi.mock('../../src/transport/fileExistence.js', async () => {
-	const actual = await vi.importActual<typeof import('../../src/transport/fileExistence.js')>(
-		'../../src/transport/fileExistence.js',
+vi.mock('../../src/transport/fileExistence.ts', async () => {
+	const actual = await vi.importActual<typeof import('../../src/transport/fileExistence.ts')>(
+		'../../src/transport/fileExistence.ts',
 	);
 	return {
 		...actual,
@@ -22,27 +23,26 @@ vi.mock('../../src/transport/fileExistence.js', async () => {
 	};
 });
 
-import { assertAllowedPath, UploadValidationError } from '../../src/transport/uploadGuard.js';
-import { assertFileExists, FileNotFoundError } from '../../src/transport/fileExistence.js';
-import { updateFile } from '../../src/tools/update-file.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.js';
+import { assertAllowedPath, UploadValidationError } from '../../src/transport/uploadGuard.ts';
+import { assertFileExists, FileNotFoundError } from '../../src/transport/fileExistence.ts';
+import { updateFile } from '../../src/tools/update-file.ts';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
+
+// fakeContext's edit slice throws on any method a test leaves unstubbed.
+const baseEdit = fakeContext().edit;
 
 function ctxWith(
 	opts: {
 		mwn?: ReturnType<typeof createMockMwn>;
-		submitUpload?: ReturnType<typeof vi.fn>;
+		submitUpload?: Mock;
 	} = {},
 ) {
 	const mwn = opts.mwn ?? createMockMwn();
 	const submitUpload = opts.submitUpload ?? vi.fn();
 	const ctx = fakeContext({
 		mwn: async () => mwn as never,
-		edit: {
-			submit: vi.fn() as never,
-			submitUpload: submitUpload as never,
-			applyTags: (o: object) => ({ ...o }),
-		},
+		edit: { ...baseEdit, submitUpload },
 		uploadDirs: { list: () => ['/home/user/uploads'] },
 	});
 	return { mwn, submitUpload, ctx };

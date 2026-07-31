@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
 import { SignJWT, UnsecuredJWT } from 'jose';
-import * as jwt from '../../../src/auth/authorizationServer/jwt.js';
+import * as jwt from '../../../src/auth/authorizationServer/jwt.ts';
 
 const key = 'k'.repeat(32);
 const issuer = 'https://wiki.example/mcp';
@@ -230,6 +230,7 @@ describe('proxy jwt', () => {
 				issuer,
 				signingKey: key,
 				upstreamTokenId: 'u1',
+				refreshId: 'rid-1',
 				ttlMs: 60_000,
 			});
 			expect(

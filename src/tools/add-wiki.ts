@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ManagementContext } from '../runtime/context.js';
-import { discoverWiki } from '../wikis/wikiDiscovery.js';
-import { SsrfValidationError } from '../transport/ssrfGuard.js';
-import { DuplicateWikiKeyError } from '../wikis/wikiRegistry.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ManagementContext } from '../runtime/context.ts';
+import { discoverWiki } from '../wikis/wikiDiscovery.ts';
+import { SsrfValidationError } from '../transport/ssrfGuard.ts';
+import { DuplicateWikiKeyError } from '../wikis/wikiRegistry.ts';
 
 const inputSchema = {
 	wikiUrl: z
@@ -25,7 +25,7 @@ export const addWiki: Tool<typeof inputSchema, ManagementContext> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'add wiki',
 	target: (a) => a.wikiUrl,
 
@@ -47,6 +47,16 @@ export const addWiki: Tool<typeof inputSchema, ManagementContext> = {
 			);
 		}
 
+		// A wiki added at runtime must not be more privileged than the deployment
+		// it joins. `add-wiki` takes only a URL, so the caller cannot express a
+		// read-only intent; inheriting the restrictive posture is the safe
+		// reading of an ambiguous request. Without this, one call on an
+		// all-read-only deployment revealed every write tool, because the
+		// tools/list gate offers writes as soon as ANY configured wiki is
+		// writable and an added wiki carried no `readOnly` field at all.
+		const configured = Object.values(ctx.wikis.getAll());
+		const readOnly = configured.length > 0 && configured.every((w) => w.readOnly === true);
+
 		try {
 			ctx.wikis.add(wikiInfo.servername, {
 				sitename: wikiInfo.sitename,
@@ -55,6 +65,7 @@ export const addWiki: Tool<typeof inputSchema, ManagementContext> = {
 				scriptpath: wikiInfo.scriptpath,
 				token: null,
 				private: false,
+				readOnly,
 			});
 		} catch (error) {
 			if (error instanceof DuplicateWikiKeyError) {

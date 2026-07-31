@@ -1,10 +1,16 @@
+import type { RateLimitSettings } from './rateLimit.ts';
+
 export interface HttpConfig {
 	host: string;
 	port: number;
 	allowedHosts: string[] | undefined;
-	allowedOrigins: string[] | undefined;
+	// Always an array, never undefined: the Origin guard is mounted
+	// unconditionally, and an empty allowlist means "refuse every cross-origin
+	// request", which is the safe default rather than an absent control.
+	allowedOrigins: string[];
 	maxRequestBody: string;
-	sessionIdleTimeoutMs: number;
+	// null when the operator disabled rate limiting with MCP_RATE_LIMIT=0.
+	rateLimit: RateLimitSettings | null;
 	warnings: string[];
 }
 
@@ -14,11 +20,6 @@ const DEFAULT_HOST = '127.0.0.1';
 const DEFAULT_PORT = 3000;
 const MAX_PORT = 65535;
 const DEFAULT_MAX_REQUEST_BODY = '1mb';
-const DEFAULT_SESSION_IDLE_TIMEOUT_S = 1800;
-// setTimeout clamps delays above its 32-bit signed ceiling to 1ms, which would
-// expire every session almost immediately. Cap the resolved value at that
-// ceiling so a large MCP_SESSION_IDLE_TIMEOUT stays a long-but-valid delay.
-const MAX_SESSION_IDLE_TIMEOUT_MS = 2147483647;
 
 // Mirrors body-parser's size grammar: optional decimal number followed by an
 // optional unit (bytes if omitted). Validating at startup prevents body-parser
@@ -46,25 +47,6 @@ function resolvePort(): number {
 	return parsed;
 }
 
-function resolveSessionIdleTimeoutMs(): number {
-	const raw = process.env.MCP_SESSION_IDLE_TIMEOUT;
-	if (raw === undefined || raw.trim() === '') {
-		return DEFAULT_SESSION_IDLE_TIMEOUT_S * 1000;
-	}
-	// Strict parse: require a plain run of digits so trailing garbage ('300abc')
-	// and scientific notation ('1e9') — both of which Number.parseInt silently
-	// truncates to a wrong value — fall back to the default instead. 0 disables
-	// expiry. Number.isInteger guards the (practically unreachable) overflow case.
-	const trimmed = raw.trim();
-	const seconds = Number(trimmed);
-	if (!/^\d+$/.test(trimmed) || !Number.isInteger(seconds)) {
-		return DEFAULT_SESSION_IDLE_TIMEOUT_S * 1000;
-	}
-	// Clamp to setTimeout's ceiling so an over-large value stays a valid delay
-	// instead of being clamped to 1ms by Node.
-	return Math.min(seconds * 1000, MAX_SESSION_IDLE_TIMEOUT_MS);
-}
-
 function resolveAllowedHosts(): string[] | undefined {
 	const raw = process.env.MCP_ALLOWED_HOSTS;
 	if (raw === undefined || raw === '') {
@@ -83,7 +65,14 @@ function defaultLocalhostOrigins(port: number): string[] {
 	return [`http://localhost:${port}`, `http://127.0.0.1:${port}`, `http://[::1]:${port}`];
 }
 
-function resolveAllowedOrigins(host: string, port: number): string[] | undefined {
+// The Origin allowlist: the operator's explicit list, or the loopback spellings
+// for a local bind. Any other bind gets an empty list, which refuses every
+// request carrying an Origin while leaving requests without one — every
+// non-browser MCP client — untouched. Nothing else is inferred: MCP_PUBLIC_URL
+// names this server's OAuth issuer, which in the usual topology is the wiki's
+// own host, and a host that serves user-editable JavaScript must not become a
+// browser-origin allowlist as a side effect of configuring sign-in.
+function resolveAllowedOrigins(host: string, port: number): string[] {
 	const raw = process.env.MCP_ALLOWED_ORIGINS;
 	if (raw !== undefined && raw !== '') {
 		const entries = raw
@@ -97,7 +86,7 @@ function resolveAllowedOrigins(host: string, port: number): string[] | undefined
 	if (LOCALHOST_HOSTS.includes(host)) {
 		return defaultLocalhostOrigins(port);
 	}
-	return undefined;
+	return [];
 }
 
 function resolveMaxRequestBody(): { value: string; warning?: string } {
@@ -124,13 +113,69 @@ function resolveMaxRequestBody(): { value: string; warning?: string } {
 	return { value: trimmed };
 }
 
+const DEFAULT_RATE_LIMIT = 30;
+const DEFAULT_ANONYMOUS_RATE_LIMIT = 100;
+
+// Accepts a non-negative number; undefined means unset, null means unparseable.
+function parseRateValue(raw: string | undefined): number | null | undefined {
+	if (raw === undefined || raw.trim() === '') {
+		return undefined;
+	}
+	const parsed = Number(raw);
+	return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
+}
+
+// Rate limiting for tools/call, on by default. MCP_RATE_LIMIT=0 disables it
+// entirely; MCP_RATE_LIMIT_ANONYMOUS=0 leaves anonymous traffic unlimited while
+// signed-in callers stay limited. Bursts default to twice the sustained rate,
+// the headroom an agent firing a batch of calls needs; only the per-caller
+// burst is separately tunable.
+function resolveRateLimit(): { value: RateLimitSettings | null; warnings: string[] } {
+	const warnings: string[] = [];
+	const read = (name: string, fallback: number): number => {
+		const parsed = parseRateValue(process.env[name]);
+		if (parsed === null) {
+			warnings.push(
+				`${name}=${process.env[name]} is not a non-negative number; using default ${fallback}`,
+			);
+			return fallback;
+		}
+		return parsed ?? fallback;
+	};
+	const rate = read('MCP_RATE_LIMIT', DEFAULT_RATE_LIMIT);
+	if (rate === 0) {
+		return { value: null, warnings };
+	}
+	const burst = read('MCP_RATE_LIMIT_BURST', rate * 2);
+	const anonymousRate = read('MCP_RATE_LIMIT_ANONYMOUS', DEFAULT_ANONYMOUS_RATE_LIMIT);
+	return {
+		value: {
+			ratePerSecond: rate,
+			burst: Math.max(1, burst),
+			anonymousRatePerSecond: anonymousRate,
+			anonymousBurst: Math.max(1, anonymousRate * 2),
+		},
+		warnings,
+	};
+}
+
 export function resolveHttpConfig(): HttpConfig {
 	const host = resolveHost();
 	const port = resolvePort();
 	const body = resolveMaxRequestBody();
-	const warnings: string[] = [];
+	const rateLimit = resolveRateLimit();
+	const warnings: string[] = [...rateLimit.warnings];
 	if (body.warning) {
 		warnings.push(body.warning);
+	}
+	// HTTP serving is per-request as of the 2026-07-28 MCP revision: there are
+	// no sessions left to expire, so the knob is obsolete. Warn rather than
+	// silently ignore a value still pinned in a deployment manifest.
+	if (process.env.MCP_SESSION_IDLE_TIMEOUT !== undefined) {
+		warnings.push(
+			'MCP_SESSION_IDLE_TIMEOUT is obsolete: HTTP serving is per-request and sessions ' +
+				'no longer exist. Remove it from the environment.',
+		);
 	}
 	return {
 		host,
@@ -138,7 +183,7 @@ export function resolveHttpConfig(): HttpConfig {
 		allowedHosts: resolveAllowedHosts(),
 		allowedOrigins: resolveAllowedOrigins(host, port),
 		maxRequestBody: body.value,
-		sessionIdleTimeoutMs: resolveSessionIdleTimeoutMs(),
+		rateLimit: rateLimit.value,
 		warnings,
 	};
 }

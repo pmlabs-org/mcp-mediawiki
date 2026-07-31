@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
-import type { ProxyConfig } from './proxyConfig.js';
-import type { ProxyStore } from './proxyStore.js';
-import { exchangeCode as defaultExchange } from '../oauthFlow.js';
+import type { ProxyConfig } from './proxyConfig.ts';
+import type { ProxyStore } from './proxyStore.ts';
+import { exchangeCode as defaultExchange } from '../oauthFlow.ts';
+import { mwOauth2TokenEndpoint } from '../mwOauth2Endpoints.ts';
 
 type ExchangeFn = typeof defaultExchange;
 
@@ -87,7 +88,7 @@ export async function handleCallback(
 		// uses tokenExchangeBase (the internal service URL), distinct from the
 		// public authorizeBase the browser was redirected to.
 		tokens = await exchange({
-			tokenEndpoint: `${pc.tokenExchangeBase}${pc.scriptpath}/rest.php/oauth2/access_token`,
+			tokenEndpoint: mwOauth2TokenEndpoint(pc.tokenExchangeBase, pc.scriptpath),
 			code: q.code,
 			redirectUri: pc.callbackUrl,
 			clientId: pc.upstreamClientId,
@@ -102,6 +103,10 @@ export async function handleCallback(
 		accessToken: tokens.access_token,
 		refreshToken: tokens.refresh_token,
 		expiresAt: Date.now() + tokens.expires_in * 1000,
+		// Recorded here, where the issuing client is already in hand, rather than
+		// at redemption: putUpstreamToken is the record's only write on this path,
+		// so binding it costs no extra store flush.
+		clientId: txn.clientId,
 	});
 	const clientCode = randomUUID();
 	store.putCode(clientCode, {

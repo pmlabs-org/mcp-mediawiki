@@ -1,13 +1,8 @@
 import { z } from 'zod';
-import type {
-	CallToolResult,
-	ToolAnnotations,
-	ImageContent,
-	TextContent,
-} from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult, ImageContent, TextContent } from '@modelcontextprotocol/server';
 import type { ApiPage, ImageInfo } from 'mwn';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
 
 const DEFAULT_IMAGE_WIDTH = 1024;
 const DEFAULT_TEXT_WIDTH = 512;
@@ -59,7 +54,7 @@ export const getFileData: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'fetch the file image',
 	target: (a) => a.title,
 

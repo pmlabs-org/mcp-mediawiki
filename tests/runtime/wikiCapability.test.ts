@@ -1,47 +1,52 @@
-import { describe, it, expect } from 'vitest';
-import { checkWikiCapability, WRITE_TOOL_NAMES } from '../../src/runtime/wikiCapability.js';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { withRequestFields } from '../../src/transport/requestContext.js';
+import { describe, it, expect, afterEach, vi } from 'vitest';
+import { checkWikiCapability, WRITE_TOOL_NAMES } from '../../src/runtime/wikiCapability.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { withRequestFields } from '../../src/runtime/requestContext.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
 
-const rwWiki = {
+const rwWiki: WikiConfig = {
 	sitename: 'X',
 	server: 'https://x',
 	articlepath: '/wiki',
 	scriptpath: '/w',
-} as never;
-const roWiki = { ...rwWiki, readOnly: true } as never;
-const oauthWiki = { ...rwWiki, oauth2ClientId: 'client-id' } as never;
-const oauthWithTokenWiki = {
+};
+const roWiki: WikiConfig = { ...rwWiki, readOnly: true };
+const oauthWiki: WikiConfig = { ...rwWiki, oauth2ClientId: 'client-id' };
+const oauthWithTokenWiki: WikiConfig = {
 	...rwWiki,
 	oauth2ClientId: 'client-id',
 	token: 'static-token',
-} as never;
+};
 
 function ctx(
 	hasExt: boolean,
-	wikiConfig: unknown,
+	wikiConfig: WikiConfig,
 	reachable = true,
 	transport: 'http' | 'stdio' = 'stdio',
 ) {
 	return fakeContext({
 		transport,
 		wikis: {
-			getAll: () => ({ w: wikiConfig }) as never,
-			get: (() => wikiConfig) as never,
-			add: (() => {}) as never,
-			remove: (() => {}) as never,
+			getAll: () => ({ w: wikiConfig }),
+			get: () => wikiConfig,
+			add: () => {},
+			remove: () => {},
 			isManagementAllowed: () => true,
 		},
 		wikiProbe: {
-			hasExtension: (async () => hasExt) as never,
-			hasAnyExtension: (async () => hasExt) as never,
-			invalidate: (() => {}) as never,
-			inspect: (async () => ({ reachable, extensions: new Set<string>() })) as never,
+			hasExtension: async () => hasExt,
+			hasAnyExtension: async () => hasExt,
+			invalidate: () => {},
+			inspect: async () => ({ reachable, extensions: new Set<string>() }),
 		},
 	});
 }
 
 describe('checkWikiCapability', () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
 	it('rejects an extension tool when the wiki lacks the extension', async () => {
 		const result = await checkWikiCapability('cargo-query', 'w', ctx(false, rwWiki));
 		expect(result?.isError).toBe(true);
@@ -91,8 +96,23 @@ describe('checkWikiCapability', () => {
 		expect(result?.isError).toBe(true);
 		const raw = result?.content?.map((c) => (c as { text?: string }).text).join('') ?? '';
 		const message = (JSON.parse(raw) as { message: string }).message;
-		expect(message).toContain('requires OAuth');
+		expect(message).toContain('requires an authenticated user');
 		expect(message).toContain('Wiki "w"');
+		// The actionable half, which differs by deployment: with no way to obtain a
+		// token, asking the caller for one would send it at a transport that refuses
+		// it, so the message names the operator's action instead.
+		expect(message).toContain('hosted OAuth sign-in is not configured');
+		expect(message).not.toContain('Send an Authorization: Bearer');
+	});
+
+	it('asks the caller for a token instead once forwarding is opted into', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
+		const result = await checkWikiCapability('get-page', 'w', ctx(false, oauthWiki, true, 'http'));
+		expect(result?.isError).toBe(true);
+		const raw = result?.content?.map((c) => (c as { text?: string }).text).join('') ?? '';
+		const message = (JSON.parse(raw) as { message: string }).message;
+		expect(message).toContain('Send an Authorization: Bearer');
+		expect(message).not.toContain('hosted OAuth sign-in is not configured');
 	});
 
 	it('allows an HTTP call to an OAuth-only wiki when a runtime bearer is present', async () => {
@@ -120,7 +140,7 @@ describe('checkWikiCapability', () => {
 			ctx(false, oauthWiki, true, 'http'),
 		);
 		expect(result?.isError).toBe(true);
-		expect(JSON.stringify(result?.content)).toContain('requires OAuth');
+		expect(JSON.stringify(result?.content)).toContain('requires an authenticated user');
 		expect(JSON.stringify(result?.content)).not.toContain('not installed');
 	});
 

@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiEditPageParams } from 'types-mediawiki-api';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { buildPageUrl, formatEditComment } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { buildPageUrl, formatEditComment } from '../wikis/utils.ts';
 
 const inputSchema = {
 	source: z.string().describe('Page content in the format specified by the contentModel parameter'),
@@ -34,7 +34,7 @@ export const createPage: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'create page',
 	target: (a) => a.title,
 
@@ -45,8 +45,7 @@ export const createPage: Tool<typeof inputSchema> = {
 		const mwn = await ctx.mwn();
 		const baseOptions: ApiEditPageParams = {};
 		if (contentModel !== undefined) {
-			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- input is validated against ApiEditPageParams.contentmodel via the inputSchema enum
-			baseOptions.contentmodel = contentModel as ApiEditPageParams['contentmodel'];
+			baseOptions.contentmodel = contentModel;
 		}
 		if (bot === true) {
 			baseOptions.bot = true;
@@ -55,7 +54,7 @@ export const createPage: Tool<typeof inputSchema> = {
 		const result = await mwn.create(
 			title,
 			source,
-			formatEditComment('create-page', comment),
+			formatEditComment(ctx, 'create-page', comment),
 			options,
 		);
 

@@ -1,13 +1,15 @@
+import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { z } from 'zod';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import type { Tool } from '../../src/runtime/tool.js';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { createMockMwnError } from '../helpers/mock-mwn-error.js';
-import { clearRegisteredServers } from '../../src/runtime/logger.js';
-import { CredentialResolutionError } from '../../src/errors/credentialResolutionError.js';
-import { getPage } from '../../src/tools/get-page.js';
-import { ContentFormat } from '../../src/results/contentFormat.js';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import type { Tool } from '../../src/runtime/tool.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { fakeLogger } from '../helpers/fakeLogger.ts';
+import { createMockMwnError } from '../helpers/mock-mwn-error.ts';
+import { CredentialResolutionError } from '../../src/errors/credentialResolutionError.ts';
+import { withRequestFields } from '../../src/runtime/requestContext.ts';
+import { getPage } from '../../src/tools/get-page.ts';
+import { ContentFormat } from '../../src/results/contentFormat.ts';
 
 const noopTool = (handle: Tool<{ x: z.ZodString }>['handle']): Tool<{ x: z.ZodString }> => ({
 	name: 'get-page',
@@ -23,9 +25,7 @@ const noopTool = (handle: Tool<{ x: z.ZodString }>['handle']): Tool<{ x: z.ZodSt
 	handle,
 });
 
-function captureToolCallLine(
-	spy: ReturnType<typeof vi.spyOn>,
-): Record<string, unknown> | undefined {
+function captureToolCallLine(spy: StderrWriteSpy): Record<string, unknown> | undefined {
 	const events = spy.mock.calls
 		.map((c) => String(c[0]))
 		.filter((s) => s.startsWith('{'))
@@ -71,12 +71,7 @@ describe('dispatcher', () => {
 	});
 
 	it('logs the failure with tool name and category', async () => {
-		const logger = {
-			info: vi.fn(),
-			warning: vi.fn(),
-			error: vi.fn(),
-			debug: vi.fn(),
-		};
+		const logger = fakeLogger();
 		const ctx = fakeContext({ logger });
 		const tool = noopTool(async () => {
 			throw new Error('boom');
@@ -130,7 +125,7 @@ describe('dispatcher', () => {
 });
 
 describe('dispatcher emits tool_call telemetry', () => {
-	let stderrSpy: ReturnType<typeof vi.spyOn>;
+	let stderrSpy: StderrWriteSpy;
 
 	beforeEach(() => {
 		vi.stubEnv('MCP_LOG_LEVEL', 'debug');
@@ -139,7 +134,6 @@ describe('dispatcher emits tool_call telemetry', () => {
 
 	afterEach(() => {
 		stderrSpy.mockRestore();
-		clearRegisteredServers();
 		vi.unstubAllEnvs();
 	});
 
@@ -167,5 +161,38 @@ describe('dispatcher emits tool_call telemetry', () => {
 		expect(line!.outcome).toBe('permission_denied');
 		expect(line!.level).toBe('warning');
 		expect(typeof line!.error_message).toBe('string');
+	});
+
+	it('reports an aborted call as cancelled rather than an upstream failure', async () => {
+		const ctx = fakeContext();
+		// What a torn-down request actually looks like from the tool's side: mwn
+		// surfaces the abort as a malformed response, not as an abort, so the
+		// classifier would otherwise call this a wiki outage.
+		const tool = noopTool(async () => {
+			throw new TypeError("Cannot read properties of undefined (reading 'pages')");
+		});
+		const controller = new AbortController();
+		controller.abort();
+
+		await withRequestFields({ signal: controller.signal }, () => dispatch(tool, ctx)({ x: 'y' }));
+
+		const line = captureToolCallLine(stderrSpy);
+		expect(line).toBeDefined();
+		expect(line!.outcome).toBe('cancelled');
+		expect(line!.level).toBe('info');
+	});
+
+	it('still reports a genuine failure as an upstream failure when nothing was cancelled', async () => {
+		const ctx = fakeContext();
+		const tool = noopTool(async () => {
+			throw new TypeError("Cannot read properties of undefined (reading 'pages')");
+		});
+		const controller = new AbortController();
+
+		await withRequestFields({ signal: controller.signal }, () => dispatch(tool, ctx)({ x: 'y' }));
+
+		const line = captureToolCallLine(stderrSpy);
+		expect(line!.outcome).toBe('upstream_failure');
+		expect(line!.level).toBe('error');
 	});
 });

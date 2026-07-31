@@ -2,6 +2,10 @@
 
 const TIMEOUT_MS = 5000;
 
+// Deliberately not the SDK's OAuthTokens, which requires token_type and makes
+// expires_in optional — the inverse of what post() enforces. expires_in must
+// be present because token stores schedule refresh from it; token_type may be
+// absent in MediaWiki responses.
 export interface TokenResponse {
 	access_token: string;
 	refresh_token?: string;
@@ -20,6 +24,21 @@ export class OAuthFlowError extends Error {
 		super(message);
 		this.name = 'OAuthFlowError';
 	}
+}
+
+export type RefreshErrorClass = 'retryable' | 'dead';
+
+// Classifies a refresh-grant failure so every caller reacts consistently. A
+// transient or malformed upstream failure (wiki 5xx, connection blip, garbled
+// body) is `retryable`: the presented refresh token is still good, so a caller
+// should surface a retryable error rather than force a full re-authentication. A
+// genuine rejection (invalid_grant/invalid_client) — or any non-OAuth error — is
+// `dead`: the refresh token cannot be used again.
+export function classifyRefreshError(err: unknown): RefreshErrorClass {
+	if (err instanceof OAuthFlowError && (err.kind === 'transient' || err.kind === 'malformed')) {
+		return 'retryable';
+	}
+	return 'dead';
 }
 
 export interface ExchangeArgs {

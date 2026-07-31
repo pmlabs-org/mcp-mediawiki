@@ -1,49 +1,17 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
-
-// Importing streamableHttp.ts runs its module top-level boot (config load,
-// startup guard, app.listen). Mock the config + mwn provider so the boot is
-// harmless under test, matching streamableHttp.oauth.test.ts.
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test',
-					server: 'https://test.example',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = () => Promise.reject(new Error('mwn not available in tests'));
-		invalidate = () => {};
-	},
-}));
+import { describe, it, expect, afterEach } from 'vitest';
 
 import express, { type Express, type RequestHandler } from 'express';
 import request from 'supertest';
 import {
 	createOAuthProtectedResourceHandler,
 	type ProxyConfigGetter,
-} from '../../src/transport/streamableHttp.js';
-import { buildAsMetadata } from '../../src/auth/authorizationServer/asMetadata.js';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.js';
-import type { WikiRegistry } from '../../src/wikis/wikiRegistry.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
-import { _resetMetadataCacheForTesting } from '../../src/auth/metadata.js';
-import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.js';
+} from '../../src/transport/streamableHttp.ts';
+import { buildAsMetadata } from '../../src/auth/authorizationServer/asMetadata.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
+import { _resetMetadataCacheForTesting } from '../../src/auth/metadata.ts';
+import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 
 function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry {
 	return {
@@ -55,18 +23,15 @@ function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry 
 	} as unknown as WikiRegistry;
 }
 
-const PROXY: ProxyConfig = {
+// A proxy whose own issuer (mcp.example) differs from the upstream wiki it
+// fronts, so an endpoint accidentally rooted at the wiki rather than at the
+// issuer shows up in the assertions below.
+const PROXY = fakeProxyConfig({
 	issuer: 'https://mcp.example/mcp',
-	authorizeBase: 'https://wiki.example',
 	tokenExchangeBase: 'https://wiki.svc',
-	scriptpath: '/w',
 	callbackUrl: 'https://mcp.example/mcp/oauth/callback',
 	upstreamClientId: 'client-id',
-	signingKey: 'k'.repeat(32),
-	consentTtlMs: 1000,
-	tokenTtlMs: 1000,
-	redirectAllowlist: [],
-};
+});
 
 // Mirrors the production AS-metadata route handler in streamableHttp.ts so the
 // 200/404 gating can be exercised without booting the side-effecting module.
@@ -152,7 +117,7 @@ describe('protected-resource authorization_servers self-advertise', () => {
 		expect(res.body.authorization_servers).toEqual(['https://mcp.example/mcp']);
 	});
 
-	it('falls back to the upstream wiki issuer when the proxy is disabled', async () => {
+	it('advertises nothing when the proxy is disabled', async () => {
 		fakeAs = await startFakeAs();
 		const wikiCfg: Partial<WikiConfig> = {
 			sitename: 'OAuthWiki',
@@ -164,7 +129,13 @@ describe('protected-resource authorization_servers self-advertise', () => {
 		const app = buildApp(fakeRegistry({ mywiki: wikiCfg }), () => null);
 
 		const res = await request(app).get('/.well-known/oauth-protected-resource');
-		expect(res.status).toBe(200);
-		expect(res.body.authorization_servers).toEqual([fakeAs.url]);
+
+		// Only the hosted proxy makes this server an authorization server. Naming the
+		// wiki's own issuer here is what steered clients into minting tokens at the
+		// wiki and presenting them to us, which is the shape the spec forbids.
+		expect(res.status).toBe(404);
+		// Answered before any upstream discovery, so an unauthenticated request no
+		// longer costs one outbound metadata fetch per OAuth wiki.
+		expect(fakeAs.metadataRequests.count).toBe(0);
 	});
 });

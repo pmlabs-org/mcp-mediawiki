@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
-import { resolveHttpConfig } from '../../src/transport/httpConfig.js';
+import { resolveHttpConfig } from '../../src/transport/httpConfig.ts';
 
 describe('resolveHttpConfig', () => {
 	afterEach(() => {
@@ -136,14 +136,24 @@ describe('resolveHttpConfig', () => {
 			]);
 		});
 
-		it('is undefined when bound to 0.0.0.0 without MCP_ALLOWED_ORIGINS', () => {
+		// Empty, not absent: an empty allowlist refuses every cross-origin request,
+		// where an absent one used to mean the guard was never mounted.
+		it('is empty when bound to 0.0.0.0 without MCP_ALLOWED_ORIGINS', () => {
 			vi.stubEnv('MCP_BIND', '0.0.0.0');
-			expect(resolveHttpConfig().allowedOrigins).toBeUndefined();
+			expect(resolveHttpConfig().allowedOrigins).toEqual([]);
 		});
 
-		it('is undefined when bound to an external host without MCP_ALLOWED_ORIGINS', () => {
+		it('is empty when bound to an external host without MCP_ALLOWED_ORIGINS', () => {
 			vi.stubEnv('MCP_BIND', 'wiki.example.org');
-			expect(resolveHttpConfig().allowedOrigins).toBeUndefined();
+			expect(resolveHttpConfig().allowedOrigins).toEqual([]);
+		});
+
+		// MCP_PUBLIC_URL names the OAuth issuer, which is usually the wiki's own
+		// host. Configuring sign-in must not admit that host's scripts.
+		it('does not infer an allowlist from MCP_PUBLIC_URL', () => {
+			vi.stubEnv('MCP_BIND', '0.0.0.0');
+			vi.stubEnv('MCP_PUBLIC_URL', 'https://wiki.example.org/mcp');
+			expect(resolveHttpConfig().allowedOrigins).toEqual([]);
 		});
 
 		it('MCP_ALLOWED_ORIGINS overrides the localhost default', () => {
@@ -178,10 +188,10 @@ describe('resolveHttpConfig', () => {
 			]);
 		});
 
-		it('is undefined when MCP_ALLOWED_ORIGINS is only separators and bound to 0.0.0.0', () => {
+		it('is empty when MCP_ALLOWED_ORIGINS is only separators and bound to 0.0.0.0', () => {
 			vi.stubEnv('MCP_BIND', '0.0.0.0');
 			vi.stubEnv('MCP_ALLOWED_ORIGINS', ',,,');
-			expect(resolveHttpConfig().allowedOrigins).toBeUndefined();
+			expect(resolveHttpConfig().allowedOrigins).toEqual([]);
 		});
 	});
 
@@ -235,53 +245,69 @@ describe('resolveHttpConfig', () => {
 		});
 	});
 
-	describe('sessionIdleTimeoutMs', () => {
-		it('defaults to 1800000 (1800s) when MCP_SESSION_IDLE_TIMEOUT is unset', () => {
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
+	describe('rateLimit', () => {
+		it('defaults to 30/s with burst 60, anonymous 100/s with burst 200', () => {
+			expect(resolveHttpConfig().rateLimit).toEqual({
+				ratePerSecond: 30,
+				burst: 60,
+				anonymousRatePerSecond: 100,
+				anonymousBurst: 200,
+			});
 		});
 
-		it('defaults to 1800000 when MCP_SESSION_IDLE_TIMEOUT is empty', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
+		it('MCP_RATE_LIMIT=0 disables rate limiting entirely', () => {
+			vi.stubEnv('MCP_RATE_LIMIT', '0');
+			expect(resolveHttpConfig().rateLimit).toBeNull();
 		});
 
-		it('defaults to 1800000 when MCP_SESSION_IDLE_TIMEOUT is whitespace', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '   ');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
+		it('burst follows a customised rate at twice its value', () => {
+			vi.stubEnv('MCP_RATE_LIMIT', '5');
+			expect(resolveHttpConfig().rateLimit).toMatchObject({ ratePerSecond: 5, burst: 10 });
 		});
 
-		it('parses an explicit value in seconds to milliseconds', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '60');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(60000);
+		it('an explicit burst overrides the derived one', () => {
+			vi.stubEnv('MCP_RATE_LIMIT', '5');
+			vi.stubEnv('MCP_RATE_LIMIT_BURST', '40');
+			expect(resolveHttpConfig().rateLimit).toMatchObject({ ratePerSecond: 5, burst: 40 });
 		});
 
-		it('treats 0 as expiry disabled', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '0');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(0);
+		it('MCP_RATE_LIMIT_ANONYMOUS=0 leaves anonymous unlimited while callers stay limited', () => {
+			vi.stubEnv('MCP_RATE_LIMIT_ANONYMOUS', '0');
+			expect(resolveHttpConfig().rateLimit).toMatchObject({
+				ratePerSecond: 30,
+				anonymousRatePerSecond: 0,
+			});
 		});
 
-		it('defaults to 1800000 when MCP_SESSION_IDLE_TIMEOUT is non-numeric', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', 'abc');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
+		it('warns and uses the default for an unparseable value', () => {
+			vi.stubEnv('MCP_RATE_LIMIT', 'lots');
+			const config = resolveHttpConfig();
+			expect(config.rateLimit).toMatchObject({ ratePerSecond: 30 });
+			expect(config.warnings.some((w) => w.includes('MCP_RATE_LIMIT=lots'))).toBe(true);
 		});
 
-		it('defaults to 1800000 when MCP_SESSION_IDLE_TIMEOUT is negative', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '-5');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
+		it('warns and uses the default for a negative value', () => {
+			vi.stubEnv('MCP_RATE_LIMIT', '-5');
+			const config = resolveHttpConfig();
+			expect(config.rateLimit).toMatchObject({ ratePerSecond: 30 });
+			expect(config.warnings.length).toBeGreaterThan(0);
+		});
+	});
+
+	describe('MCP_SESSION_IDLE_TIMEOUT (obsolete)', () => {
+		it('warns when the obsolete variable is still set', () => {
+			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '900');
+			const { warnings } = resolveHttpConfig();
+			expect(warnings).toHaveLength(1);
+			expect(warnings[0]).toContain('MCP_SESSION_IDLE_TIMEOUT');
+			expect(warnings[0]).toContain('obsolete');
 		});
 
-		it('clamps a value above the setTimeout ceiling to 2147483647ms', () => {
-			vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', '999999999999');
-			expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(2147483647);
+		it('does not warn when the variable is unset', () => {
+			expect(resolveHttpConfig().warnings.some((w) => w.includes('MCP_SESSION_IDLE_TIMEOUT'))).toBe(
+				false,
+			);
 		});
-
-		it.each(['300abc', '1e9'])(
-			'falls back to 1800000 for the non-integer value %s (strict parsing)',
-			(value) => {
-				vi.stubEnv('MCP_SESSION_IDLE_TIMEOUT', value);
-				expect(resolveHttpConfig().sessionIdleTimeoutMs).toBe(1800000);
-			},
-		);
 	});
 
 	describe('warnings', () => {

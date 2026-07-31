@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ManagementContext } from '../runtime/context.js';
-import { parseWikiResourceUri, InvalidWikiResourceUriError } from '../wikis/wikiResource.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ManagementContext } from '../runtime/context.ts';
+import { parseWikiResourceUri, InvalidWikiResourceUriError } from '../wikis/wikiResource.ts';
 
 const inputSchema = {
 	uri: z
@@ -22,7 +22,7 @@ export const removeWiki: Tool<typeof inputSchema, ManagementContext> = {
 		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: false,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'remove wiki',
 	target: (a) => a.uri,
 
@@ -39,7 +39,7 @@ export const removeWiki: Tool<typeof inputSchema, ManagementContext> = {
 
 		const wikiToRemove = ctx.wikis.get(wikiKey);
 		if (!wikiToRemove) {
-			return ctx.format.invalidInput(`mcp://wikis/${wikiKey} not found in MCP resources`);
+			return ctx.format.invalidInput(`${uri} not found in MCP resources`);
 		}
 
 		if (ctx.activeWiki.getDefaultKey() === wikiKey) {

@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { buildAsMetadata } from '../../../src/auth/authorizationServer/asMetadata.js';
-import type { ProxyConfig } from '../../../src/auth/authorizationServer/proxyConfig.js';
+import { buildAsMetadata } from '../../../src/auth/authorizationServer/asMetadata.ts';
+import type { ProxyConfig } from '../../../src/auth/authorizationServer/proxyConfig.ts';
 
 const pc = { issuer: 'https://wiki.example/mcp' } as ProxyConfig;
 
@@ -30,5 +30,11 @@ describe('buildAsMetadata', () => {
 	it('includes scopes_supported when provided', () => {
 		const m = buildAsMetadata(pc, ['read', 'write']);
 		expect(m.scopes_supported).toEqual(['read', 'write']);
+	});
+
+	it('advertises CIMD support and keeps none-only token auth', () => {
+		const doc = buildAsMetadata(pc);
+		expect(doc.client_id_metadata_document_supported).toBe(true);
+		expect(doc.token_endpoint_auth_methods_supported).toEqual(['none']);
 	});
 });

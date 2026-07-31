@@ -1,11 +1,15 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createMockMwn } from '../helpers/mock-mwn.js';
-import { createMockMwnError } from '../helpers/mock-mwn-error.js';
-import { fakeContext } from '../helpers/fakeContext.js';
-import { undeletePage } from '../../src/tools/undelete-page.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { formatPayload } from '../../src/results/format.js';
-import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.js';
+import { createMockMwn } from '../helpers/mock-mwn.ts';
+import { createMockMwnError } from '../helpers/mock-mwn-error.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
+import { undeletePage } from '../../src/tools/undelete-page.ts';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { formatPayload } from '../../src/results/format.ts';
+import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
+
+// The default fake EditService; each test spreads it and replaces only the
+// slice it exercises, so an unexpected call to another member still throws.
+const baseEdit = fakeContext().edit;
 
 describe('undelete-page', () => {
 	it('returns a structured payload on success', async () => {
@@ -77,9 +81,8 @@ describe('undelete-page', () => {
 		const ctx = fakeContext({
 			mwn: async () => mock as never,
 			edit: {
-				submit: vi.fn() as never,
-				submitUpload: vi.fn() as never,
-				applyTags: (o: object) => ({ ...o, tags: 'mcp-edit' }),
+				...baseEdit,
+				applyTags: <T extends Record<string, unknown>>(o: T) => ({ ...o, tags: 'mcp-edit' }),
 			},
 		});
 

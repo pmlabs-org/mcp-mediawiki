@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest';
-import { WikiRegistryImpl, DuplicateWikiKeyError } from '../../src/wikis/wikiRegistry.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
+import { WikiRegistryImpl, DuplicateWikiKeyError } from '../../src/wikis/wikiRegistry.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
 
 const sample = (name: string): WikiConfig => ({
 	sitename: name,
@@ -44,6 +44,35 @@ describe('WikiRegistryImpl', () => {
 	it('add rejects whitespace-only keys', () => {
 		const reg = new WikiRegistryImpl({}, true);
 		expect(() => reg.add('   ', sample('x'))).toThrow(/empty/i);
+	});
+
+	// Percent-encoding carries these through, so they are accepted where they
+	// previously were not.
+	it.each(['a/b', 'a?b', 'a#b', 'my wiki', 'a,b'])('add accepts the key %j', (key) => {
+		const reg = new WikiRegistryImpl({}, true);
+		reg.add(key, sample('x'));
+		expect(reg.get(key)).toBeDefined();
+	});
+
+	// The `wiki` tool argument tells a bare key from a resource URI by prefix, so
+	// such a key would be stripped to the wrong segment.
+	it('add rejects a key that begins with the resource URI prefix', () => {
+		const reg = new WikiRegistryImpl({}, true);
+		expect(() => reg.add('mcp://wikis/x', sample('x'))).toThrow(/cannot start with/);
+		expect(reg.get('mcp://wikis/x')).toBeUndefined();
+	});
+
+	// An unpaired surrogate makes encodeURIComponent throw, which would fail the
+	// whole resource listing rather than this one key.
+	it('add rejects a key containing an unpaired surrogate', () => {
+		const reg = new WikiRegistryImpl({}, true);
+		expect(() => reg.add('a\ud800b', sample('x'))).toThrow(/not valid Unicode/);
+	});
+
+	it('add accepts a host:port key', () => {
+		const reg = new WikiRegistryImpl({}, true);
+		reg.add('localhost:8080', sample('local'));
+		expect(reg.get('localhost:8080')?.sitename).toBe('local');
 	});
 
 	it('remove drops the key', () => {

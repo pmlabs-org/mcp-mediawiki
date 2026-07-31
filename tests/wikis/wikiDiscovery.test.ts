@@ -1,22 +1,27 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import type { LookupAddress } from 'node:dns';
 
-vi.mock('../../src/transport/httpFetch.js', () => ({
+vi.mock('../../src/transport/httpFetch.ts', () => ({
 	makeApiRequest: vi.fn(),
 	fetchPageHtml: vi.fn(),
 }));
 
-vi.mock('../../src/transport/ssrfGuard.js', () => ({
+vi.mock('../../src/transport/ssrfGuard.ts', () => ({
 	assertPublicDestination: vi.fn(),
 }));
 
-import { makeApiRequest } from '../../src/transport/httpFetch.js';
-import { assertPublicDestination } from '../../src/transport/ssrfGuard.js';
-import { discoverWiki } from '../../src/wikis/wikiDiscovery.js';
+import { makeApiRequest } from '../../src/transport/httpFetch.ts';
+import { assertPublicDestination } from '../../src/transport/ssrfGuard.ts';
+import { discoverWiki } from '../../src/wikis/wikiDiscovery.ts';
+
+// assertPublicDestination resolves the addresses it validated, so a stubbed
+// approval has to hand back a resolved public address, not nothing.
+const publicAddresses: LookupAddress[] = [{ address: '93.184.216.34', family: 4 }];
 
 describe('discoverWiki', () => {
 	beforeEach(() => {
 		vi.clearAllMocks();
-		vi.mocked(assertPublicDestination).mockResolvedValue(undefined);
+		vi.mocked(assertPublicDestination).mockResolvedValue(publicAddresses);
 	});
 
 	it('validates the supplied URL before any fetch', async () => {
@@ -43,7 +48,7 @@ describe('discoverWiki', () => {
 			},
 		});
 		vi.mocked(assertPublicDestination)
-			.mockResolvedValueOnce(undefined)
+			.mockResolvedValueOnce(publicAddresses)
 			.mockRejectedValueOnce(
 				new Error(
 					'Refusing to fetch URL resolving to non-public address 10.0.0.42 (private): http://10.0.0.42',

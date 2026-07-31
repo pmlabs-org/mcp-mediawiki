@@ -1,5 +1,18 @@
 import { describe, it, expect } from 'vitest';
-import { InMemoryProxyStore } from '../../../src/auth/authorizationServer/proxyStore.js';
+import { InMemoryProxyStore } from '../../../src/auth/authorizationServer/proxyStore.ts';
+
+describe('InMemoryProxyStore stats', () => {
+	it('reports upstream-token and client counts', () => {
+		const s = new InMemoryProxyStore();
+		expect(s.stats()).toEqual({ upstreamTokens: 0, clients: 0 });
+		s.putClient({ redirectUris: ['http://127.0.0.1/cb'], scopes: [], name: 'c' });
+		const id = s.putUpstreamToken({ accessToken: 'a', expiresAt: Date.now() + 1000 });
+		s.putUpstreamToken({ accessToken: 'b', expiresAt: Date.now() + 1000 });
+		expect(s.stats()).toEqual({ upstreamTokens: 2, clients: 1 });
+		s.deleteUpstreamToken(id);
+		expect(s.stats()).toEqual({ upstreamTokens: 1, clients: 1 });
+	});
+});
 
 describe('InMemoryProxyStore', () => {
 	it('registers and reads a client', () => {
@@ -103,5 +116,55 @@ describe('InMemoryProxyStore', () => {
 		// Abandoning (no new rid) leaves the current rid valid for a retry.
 		s.finishRefreshRotation(id);
 		expect(s.beginRefreshRotation(id, 'R1')).toBe(true);
+	});
+});
+
+describe('InMemoryProxyStore durable snapshot', () => {
+	it('round-trips clients (order preserved) and upstream tokens', () => {
+		const a = new InMemoryProxyStore();
+		const c1 = a.putClient({ redirectUris: ['r1'], scopes: [], name: 'c1' });
+		const c2 = a.putClient({ redirectUris: ['r2'], scopes: [], name: 'c2' });
+		const id = a.putUpstreamToken({
+			accessToken: 'at',
+			refreshToken: 'rt',
+			expiresAt: 5,
+			refreshId: 'rid',
+		});
+		const snap = a.snapshotDurable();
+
+		const b = new InMemoryProxyStore();
+		b.restoreDurable(snap);
+		expect(b.getClient(c1.clientId)?.name).toBe('c1');
+		expect(b.getClient(c2.clientId)?.name).toBe('c2');
+		expect(b.getUpstreamToken(id)).toEqual({
+			accessToken: 'at',
+			refreshToken: 'rt',
+			expiresAt: 5,
+			refreshId: 'rid',
+		});
+	});
+
+	it('clears prior durable state and leaves ephemeral empty on restore', () => {
+		const b = new InMemoryProxyStore();
+		b.putClient({ redirectUris: ['old'], scopes: [], name: 'old' });
+		b.restoreDurable({ version: 1, clients: [], upstream: [] });
+		expect(b.getUpstreamToken('x')).toBeUndefined();
+	});
+
+	it('rejects an unknown snapshot version', () => {
+		const b = new InMemoryProxyStore();
+		// oxlint-disable-next-line typescript/no-explicit-any -- deliberately malformed for the test
+		expect(() => b.restoreDurable({ version: 2 } as any)).toThrow();
+	});
+
+	it('preserves FIFO eviction order across a snapshot restore', () => {
+		const a = new InMemoryProxyStore(Date.now, 2); // client cap of 2
+		const c1 = a.putClient({ redirectUris: ['r1'], scopes: [], name: 'c1' });
+		a.putClient({ redirectUris: ['r2'], scopes: [], name: 'c2' });
+		const b = new InMemoryProxyStore(Date.now, 2);
+		b.restoreDurable(a.snapshotDurable());
+		// Adding a third client must evict the OLDEST (c1), proving insertion order survived.
+		b.putClient({ redirectUris: ['r3'], scopes: [], name: 'c3' });
+		expect(b.getClient(c1.clientId)).toBeUndefined();
 	});
 });

@@ -1,5 +1,5 @@
-import type { ToolContext } from '../runtime/context.js';
-import { resolveSiteInfo } from './siteInfo.js';
+import type { ToolContext } from '../runtime/context.ts';
+import { resolveSiteInfo } from './siteInfo.ts';
 
 export async function buildPageUrl(ctx: ToolContext, title: string): Promise<string> {
 	const { key } = ctx.activeWiki.get();
@@ -11,7 +11,10 @@ export async function buildPageUrl(ctx: ToolContext, title: string): Promise<str
 	return `${server}${articlepath}/${encodeURI(title.replace(/ /g, '_'))}`;
 }
 
-export function formatEditComment(tool: string, comment?: string): string {
+export function formatEditComment(ctx: ToolContext, tool: string, comment?: string): string {
+	if (ctx.activeWiki.get().config.attributeEdits === false) {
+		return comment ?? '';
+	}
 	const suffix = `(via ${tool} on MediaWiki MCP Server)`;
 	if (!comment) {
 		return `Automated edit ${suffix}`;

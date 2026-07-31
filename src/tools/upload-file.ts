@@ -1,11 +1,11 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { assertAllowedPath, UploadValidationError } from '../transport/uploadGuard.js';
-import { formatEditComment, buildPageUrl } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { assertAllowedPath, UploadValidationError } from '../transport/uploadGuard.ts';
+import { formatEditComment, buildPageUrl } from '../wikis/utils.ts';
 
 const inputSchema = {
 	filepath: z.string().describe('File path on the local disk'),
@@ -25,7 +25,7 @@ export const uploadFile: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'upload file',
 	target: (a) => a.title,
 
@@ -42,7 +42,7 @@ export const uploadFile: Tool<typeof inputSchema> = {
 
 		const mwn = await ctx.mwn();
 		const params: ApiUploadParams = {
-			comment: formatEditComment('upload-file', comment),
+			comment: formatEditComment(ctx, 'upload-file', comment),
 		};
 		const data: ApiUploadResponse = await ctx.edit.submitUpload(
 			mwn,

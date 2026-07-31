@@ -1,13 +1,13 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { errorMessage } from '../errors/isErrnoException.js';
-import { assertFileExists, FileNotFoundError } from '../transport/fileExistence.js';
-import { fetchFileBytes, shouldRescueToWiki } from '../transport/httpFetch.js';
-import { formatEditComment, buildPageUrl } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { errorMessage } from '../errors/isErrnoException.ts';
+import { assertFileExists, FileNotFoundError } from '../transport/fileExistence.ts';
+import { fetchFileBytes, shouldRescueToWiki } from '../transport/httpFetch.ts';
+import { formatEditComment, buildPageUrl } from '../wikis/utils.ts';
 
 const inputSchema = {
 	url: z.string().url().describe('URL of the file to upload'),
@@ -26,7 +26,7 @@ export const updateFileFromUrl: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: false,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'update file',
 	target: (a) => a.title,
 
@@ -44,7 +44,7 @@ export const updateFileFromUrl: Tool<typeof inputSchema> = {
 		}
 
 		const baseParams: ApiUploadParams = {
-			comment: formatEditComment('update-file-from-url', comment),
+			comment: formatEditComment(ctx, 'update-file-from-url', comment),
 			ignorewarnings: true,
 		};
 

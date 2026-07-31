@@ -6,31 +6,120 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-07-30
+
+### Security
+
+- A refresh token issued by the hosted OAuth sign-in can no longer be redeemed by a different client. A request presenting a `client_id` other than the one the token was issued to is refused with `invalid_grant` and has to sign in again. Requests that send no `client_id`, and tokens issued before this release, keep working.
+- The HTTP transport did not validate the `Origin` header on any bind other than loopback, leaving it open to DNS rebinding: an attacker who re-points a domain at a server the victim's browser can reach could call tools and read the results, without having to reach that server themselves. The Docker image binds to `0.0.0.0` by default, so this affected container deployments unless `MCP_ALLOWED_ORIGINS` or `MCP_ALLOWED_HOSTS` was set.
+
 ### Breaking changes
 
-- Hosted OAuth proxy: the upstream OAuth consumer must now be **confidential**. Set `oauth2ClientSecret` (or the `MCP_OAUTH2_CLIENT_SECRET` environment variable) for the default wiki; the proxy refuses to start without it. This is what lets the proxy refresh the upstream MediaWiki token, so users stay signed in past the wiki's OAuth2 access-token lifetime (one hour by default). Deployments that used a public/PKCE consumer must register a confidential consumer and supply its secret.
+- The HTTP transport now rate limits `tools/call`: each caller signed in through hosted OAuth gets its own allowance (default 30 per second, burst 60), all callers forwarding their own wiki token share one allowance of that size between them, and anonymous callers share a third (default 100 per second). A request over the limit is refused with `429` and a `Retry-After` header. Raise `MCP_RATE_LIMIT` / `MCP_RATE_LIMIT_BURST` / `MCP_RATE_LIMIT_ANONYMOUS` if you run high-throughput automation, or set `MCP_RATE_LIMIT=0` to disable.
+- The HTTP transport no longer forwards a caller's `Authorization: Bearer` header to MediaWiki; such a request is refused with `401`. Use [hosted OAuth sign-in](docs/deployment.md#hosted-oauth-sign-in), or set `MCP_ALLOW_BEARER_PASSTHROUGH=true` to keep the old behaviour while you migrate. That option is deprecated and will be removed.
+- The server no longer advertises the wikis' own authorization servers, so a client can no longer discover where to mint a token to send here. `list-wikis` now reports a wiki's `authorizationServer` only while `MCP_ALLOW_BEARER_PASSTHROUGH=true`, and `/.well-known/oauth-protected-resource` answers `404` unless hosted OAuth sign-in is enabled. The document a hosted sign-in publishes there is unchanged.
+- The `Origin` header is now validated on every bind, and a request carrying an unlisted origin is refused with `403`. If you serve a browser-based client from a public bind, set `MCP_ALLOWED_ORIGINS` before upgrading. Clients that send no `Origin` header, which is most of them, are unaffected.
 
 ### Added
 
-- Hosted OAuth proxy: verified first-party MCP clients now work with the hosted proxy out of the box — their OAuth callbacks are trusted by default, with no `MCP_OAUTH_ALLOWED_REDIRECTS` configuration.
-- Hosted OAuth proxy: the `MCP_OAUTH_ALLOWED_REDIRECTS` environment variable lets a deployment admit further MCP clients beyond the trusted defaults. List exact redirect URIs or use an `https://…/*` prefix pattern. Loopback, claude.ai, and the verified first-party clients always remain allowed.
-- The OAuth consent page now shows where the user will be sent after approving — the client's callback host, or "an application on this device" for local clients.
-- IPv6 loopback (`http://[::1]:…`) redirect URIs are now accepted at client registration, per RFC 8252.
-- Hosted OAuth proxy: support for Client ID Metadata Documents (CIMD). CIMD-capable clients connect using a stable, vendor-hosted client identity, with no per-client redirect entry to curate. The proxy trusts the verified first-party document hosts by default; add more with `MCP_OAUTH_CIMD_ALLOWED_HOSTS`.
+- Metrics: `/metrics` now reports `mcp_rate_limited_total`, a counter of `tools/call` requests refused with `429`, labelled by whether the caller was authenticated.
+
+### Removed
+
+- The server no longer sends log messages to connected MCP clients and no longer advertises the `logging` capability, following the feature's deprecation in the 2026-07-28 MCP revision. All logging goes to stderr, unchanged; `MCP_LOG_LEVEL` still controls it.
 
 ### Changed
 
-- Hosted OAuth proxy: sign-in state now survives server restarts and deploys. Registered clients and upstream tokens are persisted to a local, encrypted file, so users are no longer signed out on every upgrade. In Docker, mount a volume at the store path (`/app/data`); see the deployment guide.
+- Cacheable results (tool and resource lists, wiki resource reads, discovery) now carry a 60-second freshness hint instead of `ttlMs: 0`, so clients on the 2026-07-28 revision can cache them between polls. Change notifications are unaffected.
+- The hosted OAuth sign-in's approval page is shorter and now names the address you will be returned to, including for a local application, where it previously said only "an application on this device". It no longer promises a permissions step the wiki does not always show.
+- The HTTP transport's own `401`, `503` and `413` replies carry new JSON-RPC error codes: `-31001`, `-31002` and `-31003`. Clients read the HTTP status for these conditions, so no change is expected; anything matching on the old codes `-32001` and `-32000` needs updating.
 
 ### Fixed
 
-- OAuth clients that use a loopback callback on a variable port (including clients that register a portless `http://127.0.0.1/` URI) now complete the flow instead of failing with "redirect_uri not registered", per RFC 8252.
-- Hosted OAuth proxy: an upstream token refresh the wiki rejects with `invalid_client` (client authentication failed) is now reported as an authentication failure the client re-signs-in on, instead of a retryable "temporarily unavailable" that the client would loop on.
+- A tool result that renders a long or multi-line value, such as a page's wikitext, now closes it with a blank line before the next field. Previously the next field's label was the only cue the value had ended, so content containing a line like `Summary: …` read as a field of the result.
+- An error during hosted OAuth sign-in is now reported back to the application that started it, instead of only shown on a page the application never sees, so a client no longer waits indefinitely for a callback that never arrives. This covers a missing or non-S256 PKCE challenge and a `resource` naming another server.
+- A sign-in request asking for a response type this server does not support is now refused, instead of being answered with an authorization code it did not ask for.
+- Cancelling a tool call, or disconnecting while one is still running, now stops the request the server had in flight to the wiki, instead of letting it run to completion. Cancelling a write is not an undo: an edit already committed by the wiki stays committed. Cancelled calls are logged as `cancelled` rather than counted as wiki failures.
+- Reading an `mcp://wikis/{wikiKey}` resource for a wiki that is not configured now fails with a JSON-RPC `-32602` error naming the URI, as the protocol requires. It previously returned an empty document, which a client could not tell from a wiki with nothing to report.
+- Wiki keys are now percent-encoded in the `mcp://wikis/` URIs the server publishes, and decoded when one is read or passed as a `wiki` argument, so a key containing a character that needs escaping, such as `%`, a comma or a non-ASCII letter, is now reachable. A key that is already a plain hostname, with or without a port, keeps the URI it had.
+- A wiki key beginning with `mcp://wikis/` is refused at startup instead of being accepted and then resolving to the wrong wiki.
+- The HTTP transport now answers errors with JSON, in the JSON-RPC or OAuth dialect the path calls for, instead of an HTML page that could carry a stack trace when `NODE_ENV` is not `production`. This covers a body that is not valid JSON, an unsupported charset or content encoding, and any error raised while serving a request.
+- The HTTP transport's `401` and `503` replies now echo the id of the request they answer. Replies to a request whose id could not be read omit the field rather than sending `null`, which this protocol revision does not admit.
+
+## [0.15.0] - 2026-07-28
+
+### Security
+
+- Reading an `mcp://wikis/{wikiKey}` resource no longer discloses the wiki's OAuth 2.0 client secret, previously served in plaintext to any client allowed to read resources. **If you run the HTTP transport with a confidential OAuth consumer, rotate that secret.** The resource now publishes only `sitename`, `server`, `articlepath`, `scriptpath`, `private` and `readOnly`.
+
+### Breaking changes
+
+- The HTTP transport no longer creates sessions: no session id is issued and `GET /mcp` answers `405`. Clients on protocol revisions before 2026-07-28 no longer receive notifications between requests, so a tool-list change after `add-wiki` or `remove-wiki` reaches them on their next connection. Tool calls are unaffected, and stdio is unchanged.
+- `MCP_SESSION_IDLE_TIMEOUT` is obsolete; remove it from the environment. The server warns while it is still set.
+- The `mcp_active_sessions` metric is replaced by `mcp_inflight_requests` and `mcp_subscription_streams`.
+- Reading NeoWiki subjects now requires NeoWiki from 2026-07-27 or later, which renamed a Statement's property type to `propertyType` (ProfessionalWiki/NeoWiki#1169). Against an earlier NeoWiki the type now reads as empty, so update the wiki before upgrading the server.
+
+### Added
+
+- The server now speaks MCP protocol revision 2026-07-28 on both transports. Clients on earlier revisions are served as before.
+- Plugin installs can now be pointed at your own wiki: Claude Code prompts for a configuration file, and the Codex plugin forwards `CONFIG` from the shell it is launched from. Previously both were stuck on English Wikipedia.
+- The server now warns at startup when `CONFIG` points at a file that does not exist, instead of silently falling back to English Wikipedia.
+
+### Changed
+
+- The server now runs on version 2 of the MCP TypeScript SDK. No configuration changes are needed. Tool input schemas are now published as JSON Schema 2020-12 instead of draft-07, which matters only to a client that validates against a draft-07-only validator.
+- Over HTTP, event streams now carry a keep-alive every 15 seconds, so a reverse proxy that drops idle connections no longer cuts a waiting client's notification stream.
+- Calling a tool the server is not offering now fails the call outright, instead of returning the error as the tool's result. Clients that call only what the server advertises are unaffected.
+- `MCP_ALLOWED_ORIGINS` is now matched on hostname rather than whole origin, so `https://wiki.example.org` also admits other schemes and ports on that host; enforce those at your reverse proxy if you need to. In exchange, a trailing slash, a path, an explicit `:443` or a bare hostname all work now, where each previously rejected every browser request.
+- `tool_call` telemetry lines no longer carry `session_id`, and shutdown events no longer report `sessions_at_signal` / `sessions_closed`. The hashed `caller` field remains.
+
+### Fixed
+
+- The HTTP server no longer exits when a `GET /ready` probe finds the default wiki slow or unreachable; it answers the documented `503 not_ready` instead.
+- Readiness probes arriving while an earlier one is still running now share its result, so a slow wiki is asked once rather than once per waiting probe.
+- A wiki added with `add-wiki` to a deployment where every wiki is read-only is now read-only itself. It was previously writable, which revealed all the write tools.
+
+## [0.14.0] - 2026-07-23
+
+### Breaking changes
+
+- Hosted OAuth proxy: the upstream OAuth consumer must now be **confidential**. Set `oauth2ClientSecret` (or the `MCP_OAUTH2_CLIENT_SECRET` environment variable) for the default wiki; the proxy refuses to start without it. A confidential consumer is what lets the proxy refresh the upstream token, so users stay signed in past the wiki's OAuth2 access-token lifetime (one hour by default). A deployment using a public or PKCE consumer must register a confidential one and supply its secret.
+
+### Added
+
+- Edit attribution can now be turned off per wiki. Set `"attributeEdits": false` in a wiki's `config.json` entry to drop the `(via <tool> on MediaWiki MCP Server)` suffix from page and file edit summaries. It stays on by default.
+- Claude Code and Codex can now install the server as a plugin. Add the repository as a plugin marketplace once, then install from it, instead of writing configuration by hand. See the README install section.
+- Hosted OAuth proxy: verified first-party MCP clients now work out of the box. Their OAuth callbacks are trusted by default, with no `MCP_OAUTH_ALLOWED_REDIRECTS` configuration.
+- Hosted OAuth proxy: the `MCP_OAUTH_ALLOWED_REDIRECTS` environment variable lets a deployment admit further MCP clients beyond the trusted defaults. List exact redirect URIs, or use an `https://…/*` prefix pattern. Loopback, claude.ai, and the verified first-party clients always remain allowed.
+- Hosted OAuth proxy: support for Client ID Metadata Documents (CIMD). A CIMD-capable client connects using a stable, vendor-hosted identity, so there is no per-client redirect entry to curate. The proxy trusts the verified first-party document hosts by default; add more with `MCP_OAUTH_CIMD_ALLOWED_HOSTS`.
+- Hosted OAuth proxy: the consent page now shows where the user will be sent after approving, either the client's callback host or "an application on this device" for a local client.
+- Hosted OAuth proxy: IPv6 loopback (`http://[::1]:…`) redirect URIs are now accepted at client registration, per RFC 8252.
+- Metrics: the `/metrics` endpoint now reports the hosted OAuth proxy store's size and flush cost, so operators can watch the store grow, see how long each persistence write takes, and alert when one fails. The new series are the `mcp_proxy_store_upstream_tokens` and `mcp_proxy_store_clients` gauges, an `mcp_proxy_store_flush_duration_seconds` histogram, and an `mcp_proxy_store_flush_failures_total` counter.
+
+### Changed
+
+- The documented install configurations and one-click install badges now pass `-y` to npx, matching the bundled plugin manifests. This avoids an install-confirmation step for anyone whose npm is configured to require one.
+- Hosted OAuth proxy: sign-in state now survives server restarts and deploys. Registered clients and upstream tokens are persisted to a local, encrypted file, so users are no longer signed out on every upgrade. In Docker, mount a volume at the store path (`/app/data`); see the deployment guide.
+
+### Removed
+
+- The Gemini CLI extension has been retired, because Gemini CLI stopped serving consumer Google AI tiers in June 2026. Use Antigravity instead, which offers to import an existing Gemini CLI configuration. If your licence keeps Gemini CLI (for example a Code Assist Standard or Enterprise licence), add the standard configuration to its `~/.gemini/settings.json`.
+
+### Fixed
+
+- Clients no longer show a spurious `Expected ',' or ']' after array element in JSON` warning next to otherwise successful requests.
+- The HTTP server now logs a clear message and exits cleanly when it cannot bind its port, for example because the port is already in use or permission is denied, instead of terminating with an uncaught exception and a raw stack trace.
+- Hosted OAuth proxy: a client that identifies by a vendor-hosted URL (Client ID Metadata Document) is now rejected if any redirect URI in its document is not an `https`, loopback-`http`, or custom-scheme (for example `vscode://`) URL. A cleartext `http` redirect to a non-loopback host would let a network attacker on that path intercept the authorization code.
+- Hosted OAuth proxy: clients that use a loopback callback on a variable port, including those that register a portless `http://127.0.0.1/` URI, now complete the flow instead of failing with "redirect_uri not registered", per RFC 8252.
+- Hosted OAuth proxy: an upstream token refresh the wiki rejects with `invalid_client` (client authentication failed) is now reported as an authentication failure, so the client prompts for sign-in again instead of looping on a retryable "temporarily unavailable".
+- Hosted OAuth proxy: a momentary wiki outage while refreshing a near-expiry token on an active connection no longer forces the client to sign in again. The request continues with the still-valid token, or gets a retryable response, instead of a sign-in challenge triggered by a transient failure. Concurrent requests that both trigger a refresh now share one upstream refresh rather than racing.
 
 ## [0.13.1] - 2026-07-09
+
 ### Fixed
 
 - Trying to create, edit, or move a page in a protected namespace without the required right is now reported as a permission error rather than a generic upstream failure.
+- An expired or invalid OAuth access token is now reported as an authentication error rather than a generic upstream failure, so an OAuth-aware client can tell the token needs to be refreshed.
 
 ## [0.13.0] - 2026-06-17
 
@@ -227,7 +316,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - Smithery integration.
 
-[Unreleased]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.15.0...v0.16.0
+[0.15.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.14.0...v0.15.0
+[0.14.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.13.1...v0.14.0
 [0.13.1]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.11.0...v0.12.0

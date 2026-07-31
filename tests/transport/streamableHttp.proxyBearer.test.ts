@@ -1,52 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
-
-// Importing streamableHttp.ts runs its module top-level boot (config load,
-// startup guard, app.listen). Mock the config + mwn provider so the boot is
-// harmless under test, matching streamableHttp.oauth.test.ts.
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test',
-					server: 'https://test.example',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = () => Promise.reject(new Error('mwn not available in tests'));
-		invalidate = () => {};
-	},
-}));
+import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import express, { type Express } from 'express';
 import request from 'supertest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
-	resolveUpstreamBearer,
-	createMcpPostHandler,
+	createMcpRouteHandler,
+	type McpRouteOptions,
 	type ProxyConfigGetter,
-	type SessionRegistry,
-} from '../../src/transport/streamableHttp.js';
-import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.js';
-import { mintAccessToken } from '../../src/auth/authorizationServer/jwt.js';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.js';
-import type { WikiRegistry } from '../../src/wikis/wikiRegistry.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
-import { getRuntimeToken } from '../../src/transport/requestContext.js';
+} from '../../src/transport/mcpRoute.ts';
+import {
+	AUTHENTICATION_REQUIRED_ERROR_CODE,
+	UPSTREAM_UNAVAILABLE_ERROR_CODE,
+} from '../../src/transport/errorCodes.ts';
+import { resolveUpstreamBearer } from '../../src/auth/upstreamBearer.ts';
+import { OAuthFlowError } from '../../src/auth/oauthFlow.ts';
+import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
+import { mintAccessToken } from '../../src/auth/authorizationServer/jwt.ts';
+import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
+import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
+import { getRuntimeToken } from '../../src/runtime/requestContext.ts';
 
 const pc = {
 	issuer: 'https://wiki.example/mcp',
@@ -57,6 +29,10 @@ const pc = {
 } as unknown as ProxyConfig;
 
 describe('resolveUpstreamBearer', () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
 	it('returns the upstream access token for a valid JWT', async () => {
 		const store = new InMemoryProxyStore();
 		const id = store.putUpstreamToken({ accessToken: 'WA', expiresAt: Date.now() + 1e6 });
@@ -67,7 +43,7 @@ describe('resolveUpstreamBearer', () => {
 			ttlMs: 60_000,
 			scopes: [],
 		});
-		expect(await resolveUpstreamBearer(jwt, pc, store)).toBe('WA');
+		expect(await resolveUpstreamBearer(jwt, pc, store)).toMatchObject({ accessToken: 'WA' });
 	});
 
 	it('throws on an invalid JWT', async () => {
@@ -105,10 +81,20 @@ describe('resolveUpstreamBearer', () => {
 		const refresh = vi
 			.fn()
 			.mockResolvedValue({ access_token: 'NEW', refresh_token: 'WR2', expires_in: 3600 });
-		expect(await resolveUpstreamBearer(jwt, pc, store, refresh)).toBe('NEW');
+		expect(await resolveUpstreamBearer(jwt, pc, store, refresh)).toMatchObject({
+			accessToken: 'NEW',
+		});
 		expect(store.getUpstreamToken(id)?.accessToken).toBe('NEW');
 		expect(store.getUpstreamToken(id)?.refreshToken).toBe('WR2');
 		expect(refresh).toHaveBeenCalledOnce();
+		// Pin the upstream token endpoint: the proactive-refresh path builds it from
+		// tokenExchangeBase + scriptpath, and this is the only one of the shared
+		// mwOauth2TokenEndpoint call sites otherwise not asserted by URL.
+		expect(refresh).toHaveBeenCalledWith(
+			expect.objectContaining({
+				tokenEndpoint: 'http://mediawiki.svc:80/w/rest.php/oauth2/access_token',
+			}),
+		);
 	});
 
 	it('does not refresh a still-valid token', async () => {
@@ -126,8 +112,110 @@ describe('resolveUpstreamBearer', () => {
 			scopes: [],
 		});
 		const refresh = vi.fn();
-		expect(await resolveUpstreamBearer(jwt, pc, store, refresh)).toBe('STILLGOOD');
+		expect(await resolveUpstreamBearer(jwt, pc, store, refresh)).toMatchObject({
+			accessToken: 'STILLGOOD',
+		});
 		expect(refresh).not.toHaveBeenCalled();
+	});
+
+	it('falls back to the still-valid token when a proactive refresh fails transiently', async () => {
+		const store = new InMemoryProxyStore();
+		// Inside the 30s refresh skew, but not yet expired: the proactive refresh runs,
+		// and when it blips the current token is still usable.
+		const id = store.putUpstreamToken({
+			accessToken: 'STILLGOOD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() + 10_000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
+		expect(await resolveUpstreamBearer(jwt, pc, store, refresh)).toMatchObject({
+			accessToken: 'STILLGOOD',
+		});
+		expect(refresh).toHaveBeenCalledOnce();
+		// The stored token is left intact for the next attempt.
+		expect(store.getUpstreamToken(id)?.accessToken).toBe('STILLGOOD');
+	});
+
+	it('throws a retryable error when an expired token cannot be refreshed transiently', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'OLD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() - 1000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
+		await expect(resolveUpstreamBearer(jwt, pc, store, refresh)).rejects.toMatchObject({
+			retryable: true,
+		});
+	});
+
+	it('throws a non-retryable error when an expired token refresh is rejected', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'OLD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() - 1000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('invalid_grant', 'dead'));
+		await expect(resolveUpstreamBearer(jwt, pc, store, refresh)).rejects.toMatchObject({
+			retryable: false,
+		});
+	});
+
+	it('coalesces concurrent proactive refreshes into a single upstream call', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'OLD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() - 1000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		// Slow upstream refresh so both callers are genuinely in flight at once.
+		const refresh = vi
+			.fn()
+			.mockImplementation(
+				() =>
+					new Promise((resolve) =>
+						setTimeout(
+							() => resolve({ access_token: 'NEW', refresh_token: 'WR2', expires_in: 3600 }),
+							15,
+						),
+					),
+			);
+		const [a, b] = await Promise.all([
+			resolveUpstreamBearer(jwt, pc, store, refresh),
+			resolveUpstreamBearer(jwt, pc, store, refresh),
+		]);
+		expect(a.accessToken).toBe('NEW');
+		expect(b.accessToken).toBe('NEW');
+		expect(refresh).toHaveBeenCalledOnce();
 	});
 });
 
@@ -141,44 +229,36 @@ function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry 
 	} as unknown as WikiRegistry;
 }
 
-function stubCreateServer(): McpServer {
-	return new McpServer(
-		{ name: 'proxy-bearer-test-server', version: '0.0.0' },
-		{ capabilities: {} },
-	);
-}
-
-// Pre-seeds a session whose transport.handleRequest captures the runtimeToken
-// threaded into withRequestContext. POSTing with that mcp-session-id drives the
-// existing-session branch, so the handler reaches the withRequestContext call
-// without booting the real MCP transport machinery — the same fake-transport
-// seam streamableHttp.test.ts uses.
+// A fake fetch-shaped handler captures the runtimeToken threaded into
+// withRequestContext: the route converts the request and calls fetch inside
+// the request-context scope, so the guard logic is exercised without booting
+// the real MCP serving machinery.
 function buildMcpApp(
 	registry: WikiRegistry,
 	getProxyConfig: ProxyConfigGetter | undefined,
 	store: InMemoryProxyStore | undefined,
 	captured: { token?: string; seen: boolean },
+	refresh?: McpRouteOptions['refresh'],
 ): Express {
 	const app = express();
 	app.use(express.json());
-	const handleRequest = vi.fn(
-		async (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
+	const fakeHandler = {
+		fetch: async (): Promise<Response> => {
 			captured.seen = true;
 			captured.token = getRuntimeToken();
-			res.status(200).json({ ok: true });
+			return new Response(JSON.stringify({ ok: true }), {
+				status: 200,
+				headers: { 'content-type': 'application/json' },
+			});
 		},
-	);
-	const transport = {
-		sessionId: 'sid-1',
-		handleRequest,
-	} as unknown as SessionRegistry[string]['transport'];
-	const sessions: SessionRegistry = { 'sid-1': { transport, activeRequests: 0 } };
+	};
 	app.post(
 		'/mcp',
-		createMcpPostHandler(sessions, stubCreateServer, {
+		createMcpRouteHandler(fakeHandler, {
 			wikiRegistry: registry,
 			getProxyConfig,
 			proxyStore: store,
+			refresh,
 		}),
 	);
 	return app;
@@ -211,7 +291,6 @@ describe('POST /mcp proxy bearer rewire', () => {
 		const res = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
 			.set('Authorization', `Bearer ${jwt}`)
 			.send(body);
 
@@ -230,12 +309,12 @@ describe('POST /mcp proxy bearer rewire', () => {
 		const res = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
 			.set('Authorization', 'Bearer not-a-real-jwt')
 			.send(body);
 
 		expect(res.status).toBe(401);
-		expect(res.body?.error?.code).toBe(-32001);
+		expect(res.body?.error?.code).toBe(AUTHENTICATION_REQUIRED_ERROR_CODE);
+		expect(res.body?.id).toBe(body.id);
 		const wwwAuth = res.headers['www-authenticate'];
 		expect(typeof wwwAuth).toBe('string');
 		expect(wwwAuth).toMatch(/^Bearer /);
@@ -247,7 +326,7 @@ describe('POST /mcp proxy bearer rewire', () => {
 		expect(captured.seen).toBe(false);
 	});
 
-	it('serves a tokenless proxy request anonymously (no 401, undefined token)', async () => {
+	it('echoes a string request id on the 401', async () => {
 		const store = new InMemoryProxyStore();
 		const captured: { token?: string; seen: boolean } = { seen: false };
 		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
@@ -255,44 +334,198 @@ describe('POST /mcp proxy bearer rewire', () => {
 		const res = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
-			.send(body);
+			.set('Authorization', 'Bearer not-a-real-jwt')
+			.send({ ...body, id: 'req-abc' });
+
+		expect(res.status).toBe(401);
+		expect(res.body?.id).toBe('req-abc');
+	});
+
+	// The 2026-07-28 error shape admits a string or a number, so a request whose id
+	// this layer cannot read gets no id key at all rather than a null one.
+	it.each([
+		['a notification', { jsonrpc: '2.0', method: 'notifications/initialized' }],
+		['a batch', [{ jsonrpc: '2.0', id: 1, method: 'tools/list' }]],
+		['a null id', { jsonrpc: '2.0', id: null, method: 'tools/list' }],
+		['a non-scalar id', { jsonrpc: '2.0', id: { n: 1 }, method: 'tools/list' }],
+		['no method', { jsonrpc: '2.0', id: 1, result: {} }],
+	])('omits the id on the 401 for %s', async (_label, payload) => {
+		const store = new InMemoryProxyStore();
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Authorization', 'Bearer not-a-real-jwt')
+			.send(payload);
+
+		expect(res.status).toBe(401);
+		expect('id' in (res.body as object)).toBe(false);
+	});
+
+	it('serves a tokenless proxy request anonymously (no 401, undefined token)', async () => {
+		const store = new InMemoryProxyStore();
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+
+		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
 
 		expect(res.status).not.toBe(401);
 		expect(captured.seen).toBe(true);
 		expect(captured.token).toBeUndefined();
 	});
 
-	it('leaves the legacy 401 challenge unchanged when the proxy is disabled', async () => {
+	it('serves a tokenless request when the proxy is off and forwarding is not opted into', async () => {
 		const captured: { token?: string; seen: boolean } = { seen: false };
-		// Proxy disabled (getProxyConfig returns null, no store): the OAuth-only
-		// wiki with no bearer must still get the legacy 401 short-circuit.
+		// An OAuth-only wiki with no proxy and no forwarding leaves a caller nothing
+		// it can supply, so the old discovery challenge would send it round a loop it
+		// cannot complete. That state is an operator misconfiguration, not a 401.
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
+
+		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
+
+		expect(res.status).not.toBe(401);
+		expect(captured.seen).toBe(true);
+		expect(captured.token).toBeUndefined();
+	});
+
+	it('refuses a caller-supplied bearer when the proxy is off and forwarding is not opted into', async () => {
+		const captured: { token?: string; seen: boolean } = { seen: false };
 		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
 
 		const res = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
+			.set('Authorization', 'Bearer raw-wiki-token')
 			.send(body);
 
 		expect(res.status).toBe(401);
-		expect(res.body?.error?.code).toBe(-32001);
+		expect(res.body?.error?.code).toBe(AUTHENTICATION_REQUIRED_ERROR_CODE);
 		expect(captured.seen).toBe(false);
 	});
 
-	it('forwards the raw bearer unchanged when the proxy is disabled (legacy passthrough)', async () => {
+	it('challenges a tokenless request once forwarding is opted into', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
+
+		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
+
+		expect(res.status).toBe(401);
+		expect(res.body?.error?.code).toBe(AUTHENTICATION_REQUIRED_ERROR_CODE);
+		expect(res.body?.id).toBe(body.id);
+		expect(captured.seen).toBe(false);
+	});
+
+	it('forwards the raw bearer once forwarding is opted into', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
 		const captured: { token?: string; seen: boolean } = { seen: false };
 		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
 
 		const res = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
 			.set('Authorization', 'Bearer raw-wiki-token')
 			.send(body);
 
 		expect(res.status).not.toBe(401);
 		expect(captured.seen).toBe(true);
 		expect(captured.token).toBe('raw-wiki-token');
+	});
+
+	it('returns 503 (not 401) when a proxy refresh fails transiently for an expired token', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'OLD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() - 1000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Authorization', `Bearer ${jwt}`)
+			.send(body);
+
+		expect(res.status).toBe(503);
+		expect(res.body?.error?.code).toBe(UPSTREAM_UNAVAILABLE_ERROR_CODE);
+		expect(res.body?.id).toBe(body.id);
+		// A 503 must NOT carry an invalid_token challenge, which would tell the client
+		// to throw away its session and re-authenticate for a transient upstream blip.
+		expect(res.headers['www-authenticate']).toBeUndefined();
+		expect(captured.seen).toBe(false);
+	});
+
+	it('returns 401 with a re-auth challenge when an expired token refresh is rejected as a dead credential', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'OLD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() - 1000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('invalid_grant', 'dead'));
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Authorization', `Bearer ${jwt}`)
+			.send(body);
+
+		expect(res.status).toBe(401);
+		// A dead credential DOES carry the discovery challenge so the client re-signs-in.
+		const wwwAuth = res.headers['www-authenticate'];
+		expect(typeof wwwAuth).toBe('string');
+		expect(wwwAuth).toMatch(/error="invalid_token"/);
+		expect(captured.seen).toBe(false);
+	});
+
+	it('serves the request with the still-valid token when a proactive refresh fails transiently', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'STILLGOOD',
+			refreshToken: 'WR',
+			expiresAt: Date.now() + 10_000,
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
+		const captured: { token?: string; seen: boolean } = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Authorization', `Bearer ${jwt}`)
+			.send(body);
+
+		expect(res.status).not.toBe(401);
+		expect(res.status).not.toBe(503);
+		expect(captured.seen).toBe(true);
+		expect(captured.token).toBe('STILLGOOD');
 	});
 });

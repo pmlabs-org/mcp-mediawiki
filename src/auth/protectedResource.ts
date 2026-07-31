@@ -1,12 +1,13 @@
 // src/auth/protectedResource.ts
-import type { AsMetadata } from './metadata.js';
+import type { OAuthProtectedResourceMetadata } from '@modelcontextprotocol/server';
+import type { UpstreamAsMetadata } from './metadata.ts';
 
 const RESOURCE_DOCUMENTATION =
 	'https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/blob/master/docs/configuration.md#oauth';
 
 export interface ProtectedResourceInput {
 	wikis: Record<string, { oauth2ClientId?: string | null }>;
-	metadatas: readonly AsMetadata[];
+	metadatas: readonly UpstreamAsMetadata[];
 	requestHost: string | undefined;
 	requestProto: 'http' | 'https' | undefined;
 	/**
@@ -14,16 +15,20 @@ export interface ProtectedResourceInput {
 	 * authorization server. Pass the proxy issuer(s) here to advertise self
 	 * instead of the per-wiki upstream issuers derived from `metadatas`.
 	 */
-	authorizationServersOverride?: readonly string[];
+	// The authorization servers this document names. Required: only the hosted
+	// proxy makes this server an authorization server, and it names itself. There is
+	// no per-wiki fallback — naming the wikis' own issuers is what steered clients
+	// into minting tokens this server must not accept.
+	authorizationServers: readonly string[];
 }
 
-export interface ProtectedResourceDoc {
-	resource: string;
-	authorization_servers: string[];
-	bearer_methods_supported: string[];
-	scopes_supported?: string[];
-	resource_documentation?: string;
-}
+// The SDK's RFC 9728 document type, narrowed to the fields this server always
+// emits: RFC 9728 makes them optional, but a doc without an authorization
+// server would leave a client nowhere to sign in.
+export type ProtectedResourceDoc = OAuthProtectedResourceMetadata &
+	Required<
+		Pick<OAuthProtectedResourceMetadata, 'authorization_servers' | 'bearer_methods_supported'>
+	>;
 
 function anyWikiHasOAuth(wikis: Record<string, { oauth2ClientId?: string | null }>): boolean {
 	return Object.values(wikis).some(
@@ -75,10 +80,7 @@ export function buildProtectedResource(
 	// not match expected .../mcp"). resolvePublicBase keeps its trailing slash for
 	// building the resource_metadata URL; strip it for the identifier only.
 	const resource = resolvePublicBase(input.requestHost, input.requestProto).replace(/\/+$/, '');
-	const issuers =
-		input.authorizationServersOverride !== undefined
-			? [...input.authorizationServersOverride]
-			: [...new Set(input.metadatas.map((m) => m.issuer))];
+	const issuers = [...input.authorizationServers];
 	const scopes = [...new Set(input.metadatas.flatMap((m) => m.scopes_supported ?? []))];
 
 	const doc: ProtectedResourceDoc = {

@@ -1,10 +1,13 @@
 import { createHash } from 'node:crypto';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { emitTelemetryEvent } from './logger.js';
-import { recordToolCall } from './metrics.js';
-import type { ErrorCategory } from '../errors/classifyError.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import { emitTelemetryEvent } from './logger.ts';
+import { recordToolCall } from './metrics.ts';
+import type { ErrorCategory } from '../errors/classifyError.ts';
 
-export type ToolOutcome = 'success' | ErrorCategory;
+// `cancelled` sits alongside ErrorCategory rather than inside it: the caller
+// walked away, which is not a fault to classify or to shape into a response.
+// It only needs to be distinguishable in the logs and the metric.
+export type ToolOutcome = 'success' | 'cancelled' | ErrorCategory;
 
 const WARNING_OUTCOMES: ReadonlySet<ToolOutcome> = new Set([
 	'not_found',
@@ -16,7 +19,8 @@ const WARNING_OUTCOMES: ReadonlySet<ToolOutcome> = new Set([
 ]);
 
 export function levelFor(outcome: ToolOutcome): 'info' | 'warning' | 'error' {
-	if (outcome === 'success') {
+	// A cancellation is ordinary client behaviour, not a degradation.
+	if (outcome === 'success' || outcome === 'cancelled') {
 		return 'info';
 	}
 	if (outcome === 'upstream_failure') {
@@ -76,7 +80,7 @@ export function parseEnvelope(text: string | undefined): ParsedEnvelope {
 export function detectTruncation(result: CallToolResult): boolean {
 	const sc = result.structuredContent;
 	if (sc !== undefined && sc !== null && typeof sc === 'object') {
-		return 'truncation' in (sc as Record<string, unknown>);
+		return 'truncation' in sc;
 	}
 	return false;
 }
@@ -115,7 +119,6 @@ export interface EmitToolCallOptions<TArgs> {
 	readonly upstreamStatus: number | undefined;
 	readonly errorMessage: string | undefined;
 	readonly runtimeToken: string | undefined;
-	readonly sessionId: string | undefined;
 	readonly wikiKey: string;
 }
 
@@ -136,10 +139,6 @@ export function emitToolCall<TArgs>(opts: EmitToolCallOptions<TArgs>): void {
 	};
 	if (targetValue !== '') {
 		data.target = targetValue;
-	}
-	if (opts.sessionId !== undefined) {
-		const hex = createHash('sha256').update(opts.sessionId).digest('hex');
-		data.session_id = `sha256:${hex.slice(0, 12)}`;
 	}
 	if (opts.upstreamStatus !== undefined) {
 		data.upstream_status = opts.upstreamStatus;

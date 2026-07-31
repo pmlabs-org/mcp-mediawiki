@@ -1,13 +1,13 @@
 {
-  "name": "mediawiki-mcp-server",
-  "version": "0.13.1",
-  "description": "MCP server enabling AI clients to interact with any MediaWiki wiki through standard tools",
   "mcpServers": {
     "mediawiki": {
       "command": "npx",
       "args": [
         "-y",
         "@professional-wiki/mediawiki-mcp-server@latest"
+      ],
+      "env_vars": [
+        "CONFIG"
       ]
     }
   }

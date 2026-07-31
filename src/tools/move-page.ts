@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiMoveResponse } from 'mwn';
 import type { ApiMoveParams } from 'types-mediawiki-api';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { buildPageUrl, formatEditComment } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { buildPageUrl, formatEditComment } from '../wikis/utils.ts';
 
 const inputSchema = {
 	fromTitle: z.string().describe('Current title of the wiki page to move'),
@@ -40,7 +40,7 @@ export const movePage: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'move page',
 	target: (a) => a.fromTitle,
 
@@ -69,7 +69,7 @@ export const movePage: Tool<typeof inputSchema> = {
 		} = await mwn.move(
 			args.fromTitle,
 			args.toTitle,
-			formatEditComment('move-page', args.comment),
+			formatEditComment(ctx, 'move-page', args.comment),
 			options,
 		);
 

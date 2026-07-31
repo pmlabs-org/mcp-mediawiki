@@ -1,11 +1,10 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { createHash } from 'node:crypto';
+import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
+import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 
-vi.mock('../../src/runtime/metrics.js', () => ({
+vi.mock('../../src/runtime/metrics.ts', () => ({
 	recordToolCall: vi.fn(),
 }));
-
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import {
 	detectTruncation,
 	emitToolCall,
@@ -14,11 +13,10 @@ import {
 	levelFor,
 	parseEnvelope,
 	safeTarget,
-} from '../../src/runtime/instrument.js';
-import { registerServer, clearRegisteredServers } from '../../src/runtime/logger.js';
-import { recordToolCall } from '../../src/runtime/metrics.js';
+} from '../../src/runtime/instrument.ts';
+import { recordToolCall } from '../../src/runtime/metrics.ts';
 
-function captureToolCallLine(spy: ReturnType<typeof vi.spyOn>): Record<string, unknown> {
+function captureToolCallLine(spy: StderrWriteSpy): Record<string, unknown> {
 	const events = spy.mock.calls
 		.map((c) => String(c[0]))
 		.filter((s) => s.startsWith('{'))
@@ -154,7 +152,7 @@ describe('safeTarget', () => {
 });
 
 describe('emitToolCall', () => {
-	let stderrSpy: ReturnType<typeof vi.spyOn>;
+	let stderrSpy: StderrWriteSpy;
 
 	beforeEach(() => {
 		vi.stubEnv('MCP_LOG_LEVEL', 'debug');
@@ -163,7 +161,6 @@ describe('emitToolCall', () => {
 
 	afterEach(() => {
 		stderrSpy.mockRestore();
-		clearRegisteredServers();
 		vi.unstubAllEnvs();
 	});
 
@@ -178,7 +175,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -203,7 +199,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -221,7 +216,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -239,7 +233,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -259,7 +252,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -285,7 +277,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: 'msg',
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -306,7 +297,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: 429,
 			errorMessage: 'too many',
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -324,7 +314,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -342,7 +331,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -360,7 +348,6 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
@@ -378,79 +365,16 @@ describe('emitToolCall', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: 'secret-token',
-			sessionId: undefined,
 			wikiKey: 'a.example',
 		});
 
 		expect(captureToolCallLine(stderrSpy).caller).toMatch(/^sha256:[0-9a-f]{12}$/);
 	});
-
-	it('hashes session_id to sha256:<12 hex>', () => {
-		const sessionId = 'f4e1d2c3-b4a5-dead-beef-abcdef012345';
-		emitToolCall({
-			toolName: 'get-page',
-			target: undefined,
-			args: {},
-			started: performance.now(),
-			result: okResult(),
-			outcome: 'success',
-			upstreamStatus: undefined,
-			errorMessage: undefined,
-			runtimeToken: undefined,
-			sessionId,
-			wikiKey: 'a.example',
-		});
-
-		const expected = `sha256:${createHash('sha256').update(sessionId).digest('hex').slice(0, 12)}`;
-		expect(captureToolCallLine(stderrSpy).session_id).toBe(expected);
-	});
-
-	it('omits session_id when not provided', () => {
-		emitToolCall({
-			toolName: 'get-page',
-			target: undefined,
-			args: {},
-			started: performance.now(),
-			result: okResult(),
-			outcome: 'success',
-			upstreamStatus: undefined,
-			errorMessage: undefined,
-			runtimeToken: undefined,
-			sessionId: undefined,
-			wikiKey: 'a.example',
-		});
-
-		expect('session_id' in captureToolCallLine(stderrSpy)).toBe(false);
-	});
-
-	it('does not broadcast tool_call events to connected MCP clients', () => {
-		const fakeServer = {
-			sendLoggingMessage: vi.fn().mockResolvedValue(undefined),
-			server: { onclose: undefined },
-		};
-		registerServer(fakeServer as unknown as Parameters<typeof registerServer>[0]);
-
-		emitToolCall({
-			toolName: 'get-page',
-			target: undefined,
-			args: {},
-			started: performance.now(),
-			result: okResult(),
-			outcome: 'success',
-			upstreamStatus: undefined,
-			errorMessage: undefined,
-			runtimeToken: undefined,
-			sessionId: undefined,
-			wikiKey: 'a.example',
-		});
-
-		expect(fakeServer.sendLoggingMessage).not.toHaveBeenCalled();
-	});
 });
 
 describe('emitToolCall — metrics integration', () => {
 	beforeEach(() => {
-		(recordToolCall as ReturnType<typeof vi.fn>).mockClear();
+		(recordToolCall as Mock).mockClear();
 	});
 
 	it('forwards the call to recordToolCall with raw duration and labels', () => {
@@ -464,12 +388,11 @@ describe('emitToolCall — metrics integration', () => {
 			upstreamStatus: 200,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'example.org',
 		});
 		stderrSpy.mockRestore();
 		expect(recordToolCall).toHaveBeenCalledTimes(1);
-		const call = (recordToolCall as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		const call = (recordToolCall as Mock).mock.calls[0][0];
 		expect(call).toMatchObject({
 			tool: 'get-page',
 			wiki: 'example.org',
@@ -491,11 +414,10 @@ describe('emitToolCall — metrics integration', () => {
 			upstreamStatus: undefined,
 			errorMessage: undefined,
 			runtimeToken: undefined,
-			sessionId: undefined,
 			wikiKey: 'example.org',
 		});
 		stderrSpy.mockRestore();
-		const call = (recordToolCall as ReturnType<typeof vi.fn>).mock.calls[0][0];
+		const call = (recordToolCall as Mock).mock.calls[0][0];
 		expect(call.upstreamStatus).toBeUndefined();
 	});
 });

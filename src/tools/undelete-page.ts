@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiUndeleteResponse } from 'mwn';
 import type { ApiUndeleteParams } from 'types-mediawiki-api';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { formatEditComment } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { formatEditComment } from '../wikis/utils.ts';
 
 const inputSchema = {
 	title: z.string().describe('Wiki page title'),
@@ -22,7 +22,7 @@ export const undeletePage: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'undelete page',
 	target: (a) => a.title,
 
@@ -31,7 +31,7 @@ export const undeletePage: Tool<typeof inputSchema> = {
 		const options = ctx.edit.applyTags<ApiUndeleteParams>({});
 		const data: ApiUndeleteResponse & { revisions?: number } = await mwn.undelete(
 			title,
-			formatEditComment('undelete-page', comment),
+			formatEditComment(ctx, 'undelete-page', comment),
 			options,
 		);
 

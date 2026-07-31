@@ -7,6 +7,39 @@ export function isLoopbackHost(hostname: string): boolean {
 	return LOOPBACK_HOSTNAMES.has(hostname);
 }
 
+// RFC 8252 §7.3: an http loopback redirect may vary its port at runtime, so a
+// request redirect matches a registered one when the port is the ONLY component
+// that differs — scheme, host literal, userinfo, path, query, and fragment must
+// all be identical, and both sides must be http loopback. All other URIs match
+// only byte-for-byte.
+export function redirectUriMatches(requestUri: string, registeredUri: string): boolean {
+	if (requestUri === registeredUri) {
+		return true;
+	}
+	let req: URL;
+	let reg: URL;
+	try {
+		req = new URL(requestUri);
+		reg = new URL(registeredUri);
+	} catch {
+		return false;
+	}
+	if (req.protocol !== 'http:' || reg.protocol !== 'http:') {
+		return false;
+	}
+	if (!isLoopbackHost(req.hostname) || !isLoopbackHost(reg.hostname)) {
+		return false;
+	}
+	return (
+		req.hostname === reg.hostname &&
+		req.username === reg.username &&
+		req.password === reg.password &&
+		req.pathname === reg.pathname &&
+		req.search === reg.search &&
+		req.hash === reg.hash
+	);
+}
+
 export type AllowlistEntry =
 	| { kind: 'exact'; uri: string }
 	| { kind: 'prefix'; origin: string; pathPrefix: string };
@@ -67,7 +100,22 @@ export function isAllowedRedirect(redirectUri: string): boolean {
 // Security: every origin below is controlled by the named vendor, so an attacker
 // cannot receive a token at it. Trusting them by default adds no phishing sink,
 // while arbitrary hosts stay excluded by construction.
-const SHIPPED_CLIENT_DEFAULTS: AllowlistEntry[] = [];
+const SHIPPED_CLIENT_DEFAULTS: AllowlistEntry[] = [
+	// ChatGPT (openai / chatgpt.com). The per-connector prefix absorbs
+	// connector-id churn; the exact legacy path covers already-published apps.
+	'https://chatgpt.com/connector/oauth/*',
+	'https://chatgpt.com/connector_platform_oauth_redirect',
+	// Cursor (cursor.com). The hosted callback plus the cursor:// custom-scheme
+	// desktop callback. A local app registering that scheme handler could receive
+	// the code, but that is a local-attacker scenario that already implies code
+	// execution on the machine, so it is acceptable.
+	'https://www.cursor.com/agents/mcp/oauth/callback',
+	'cursor://anysphere.cursor-mcp/oauth/callback',
+	// VS Code (vscode.dev). The stable and Insiders web redirect callbacks. The
+	// desktop loopback fallback is already covered by the loopback built-in.
+	'https://vscode.dev/redirect',
+	'https://insiders.vscode.dev/redirect',
+].map(parseEntry);
 
 /**
  * Parses MCP_OAUTH_ALLOWED_REDIRECTS. Grammar (comma-separated, trimmed,

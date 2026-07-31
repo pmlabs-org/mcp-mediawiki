@@ -1,14 +1,26 @@
-import { ResourceTemplate } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import type { Resource } from '@modelcontextprotocol/sdk/types.js';
-import type { ToolContext } from '../runtime/context.js';
-import type { WikiConfig, PublicWikiConfig } from '../config/loadConfig.js';
-import { WIKI_RESOURCE_URI_PREFIX } from '../runtime/constants.js';
-import { resolveSiteInfo } from '../wikis/siteInfo.js';
+import { ResourceNotFoundError, ResourceTemplate } from '@modelcontextprotocol/server';
+import type { McpServer, Resource } from '@modelcontextprotocol/server';
+import type { ToolContext } from '../runtime/context.ts';
+import type { WikiConfig, PublicWikiConfig } from '../config/loadConfig.ts';
+import { WIKI_RESOURCE_URI_PREFIX } from '../runtime/constants.ts';
+import { resolveSiteInfo } from '../wikis/siteInfo.ts';
+import { decodeWikiKey, encodeWikiKey } from '../runtime/wikiKey.ts';
 
-function sanitize(wikiConfig: Readonly<WikiConfig>): PublicWikiConfig {
-	const { token: _token, username: _username, password: _password, ...publicConfig } = wikiConfig;
-	return publicConfig;
+// Builds the published view of a wiki by naming the public fields, so a new
+// WikiConfig field is private until someone adds it here. Credentials
+// (`token`, `username`, `password`, `oauth2ClientSecret`) and server-side
+// operational settings (`publicServer`, `oauth2CallbackPort`, `tags`,
+// `attributeEdits`, `oauth2ClientId`) are all absent by construction.
+// Undefined optional fields drop out of the JSON body, as before.
+function toPublicConfig(wikiConfig: Readonly<WikiConfig>): PublicWikiConfig {
+	return {
+		sitename: wikiConfig.sitename,
+		server: wikiConfig.server,
+		articlepath: wikiConfig.articlepath,
+		scriptpath: wikiConfig.scriptpath,
+		private: wikiConfig.private,
+		readOnly: wikiConfig.readOnly,
+	};
 }
 
 export function registerAllResources(server: McpServer, ctx: ToolContext): void {
@@ -19,7 +31,7 @@ export function registerAllResources(server: McpServer, ctx: ToolContext): void 
 			for (const wikiKey in allWikis) {
 				const wikiConfig = allWikis[wikiKey];
 				resources.push({
-					uri: `${WIKI_RESOURCE_URI_PREFIX}${wikiKey}`,
+					uri: `${WIKI_RESOURCE_URI_PREFIX}${encodeWikiKey(wikiKey)}`,
 					name: `wikis/${wikiKey}`,
 					// Cache read only — listing must not fan out a siteinfo fetch per
 					// wiki, so the description shows the configured server until a
@@ -32,17 +44,23 @@ export function registerAllResources(server: McpServer, ctx: ToolContext): void 
 		},
 	});
 
-	server.resource('wikis', resourceTemplate, async (uri, variables) => {
+	server.registerResource('wikis', resourceTemplate, {}, async (uri, variables) => {
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- MCP ResourceTemplate variables typed as string|string[]; URI template guarantees a single string
-		const wikiKey = variables.wikiKey as string;
+		const matched = variables.wikiKey as string;
+		// The SDK matches the template against the URI without percent-decoding.
+		const wikiKey = decodeWikiKey(matched);
+
+		if (wikiKey === undefined) {
+			throw new ResourceNotFoundError(uri.toString());
+		}
+
 		const wikiConfig = ctx.wikis.get(wikiKey);
 
 		if (!wikiConfig) {
-			return { contents: [] };
+			throw new ResourceNotFoundError(uri.toString());
 		}
 
-		const sanitized = sanitize(wikiConfig);
-		const result: Record<string, unknown> = { ...sanitized };
+		const result: Record<string, unknown> = { ...toPublicConfig(wikiConfig) };
 
 		const siteInfo = await resolveSiteInfo(ctx, wikiKey);
 		result.server = siteInfo.server;

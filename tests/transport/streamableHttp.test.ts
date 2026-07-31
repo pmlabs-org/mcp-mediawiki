@@ -1,83 +1,62 @@
 import { describe, it, expect, vi } from 'vitest';
 
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test',
-					server: 'https://test.example',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = () => Promise.reject(new Error('mwn not available in tests'));
-		invalidate = () => {};
-	},
-}));
-
-import express, { type Express, type Request } from 'express';
+import express, { type Express } from 'express';
 import request from 'supertest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
-	createInFlightCounter,
-	createMcpPostHandler,
-	createSessionRequestHandler,
-	extractBearerToken,
-	markSessionActive,
-	markSessionIdle,
-	payloadTooLargeHandler,
+	createMcpHandler,
+	INTERNAL_ERROR,
+	McpServer,
+	PARSE_ERROR,
+} from '@modelcontextprotocol/server';
+import {
+	errorHandler,
+	handleListenError,
 	resolveMcpHostValidation,
-	type SessionRegistry,
-	withRequestContext,
-} from '../../src/transport/streamableHttp.js';
-import { getRuntimeToken, getSessionId } from '../../src/transport/requestContext.js';
+	resolveMcpOriginValidation,
+	toOriginHostnames,
+} from '../../src/transport/streamableHttp.ts';
+import {
+	AUTHENTICATION_REQUIRED_ERROR_CODE,
+	PAYLOAD_TOO_LARGE_ERROR_CODE,
+	UPSTREAM_UNAVAILABLE_ERROR_CODE,
+} from '../../src/transport/errorCodes.ts';
+import { createMcpRouteHandler } from '../../src/transport/mcpRoute.ts';
+import { createInFlightCounter } from '../../src/transport/inFlight.ts';
+import { getRuntimeToken, withRequestContext } from '../../src/runtime/requestContext.ts';
+import { logger } from '../../src/runtime/logger.ts';
 
-function req(authorization: string | undefined): Request {
-	return { headers: { authorization } } as unknown as Request;
-}
+describe('handleListenError', () => {
+	function listenErr(code: string): NodeJS.ErrnoException {
+		return Object.assign(new Error(`${code} boom`), { code });
+	}
 
-describe('extractBearerToken', () => {
-	it('returns the token for a standard Bearer header', () => {
-		expect(extractBearerToken(req('Bearer abc123'))).toBe('abc123');
+	it('reports EADDRINUSE with the address and exits non-zero', () => {
+		const onFatal = vi.fn();
+		const spy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+		handleListenError(listenErr('EADDRINUSE'), '127.0.0.1', 3000, onFatal);
+		expect(spy.mock.calls[0][0]).toContain('127.0.0.1:3000');
+		expect(spy.mock.calls[0][0]).toMatch(/already in use/i);
+		expect(onFatal).toHaveBeenCalledWith(1);
+		spy.mockRestore();
 	});
-	it('is case-insensitive on the scheme', () => {
-		expect(extractBearerToken(req('bearer abc123'))).toBe('abc123');
-		expect(extractBearerToken(req('BEARER abc123'))).toBe('abc123');
+
+	it('reports EACCES as a permission error and exits non-zero', () => {
+		const onFatal = vi.fn();
+		const spy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+		handleListenError(listenErr('EACCES'), '0.0.0.0', 80, onFatal);
+		expect(spy.mock.calls[0][0]).toContain('0.0.0.0:80');
+		expect(spy.mock.calls[0][0]).toMatch(/permission/i);
+		expect(onFatal).toHaveBeenCalledWith(1);
+		spy.mockRestore();
 	});
-	it('trims whitespace around the token', () => {
-		expect(extractBearerToken(req('Bearer   abc123  '))).toBe('abc123');
-	});
-	it('returns undefined for whitespace-only tokens', () => {
-		expect(extractBearerToken(req('Bearer   \t'))).toBeUndefined();
-		expect(extractBearerToken(req('Bearer '))).toBeUndefined();
-	});
-	it('returns undefined when header is missing', () => {
-		expect(extractBearerToken(req(undefined))).toBeUndefined();
-	});
-	it('returns undefined for non-Bearer schemes', () => {
-		expect(extractBearerToken(req('Basic xyz'))).toBeUndefined();
-		expect(extractBearerToken(req('Digest xyz'))).toBeUndefined();
-	});
-	it('takes the first well-formed value from comma-joined duplicate headers', () => {
-		expect(extractBearerToken(req('Bearer abc, Bearer def'))).toBe('abc');
-	});
-	it('returns undefined if the first comma-joined value is not Bearer', () => {
-		expect(extractBearerToken(req(', Bearer abc'))).toBeUndefined();
-		expect(extractBearerToken(req('Basic xyz, Bearer abc'))).toBeUndefined();
+
+	it('reports an unexpected listen error generically and exits non-zero', () => {
+		const onFatal = vi.fn();
+		const spy = vi.spyOn(logger, 'error').mockImplementation(() => {});
+		handleListenError(listenErr('EPIPE'), '127.0.0.1', 3000, onFatal);
+		expect(spy.mock.calls[0][0]).toContain('EPIPE boom');
+		expect(onFatal).toHaveBeenCalledWith(1);
+		spy.mockRestore();
 	});
 });
 
@@ -149,137 +128,59 @@ describe('host validation (scoped to /mcp)', () => {
 	});
 });
 
-describe('session request handler (GET/DELETE)', () => {
-	function buildApp(sessions: SessionRegistry): {
-		app: Express;
-		handleRequest: ReturnType<typeof vi.fn>;
-	} {
-		const app = express();
-		app.use(express.json());
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { end: () => void } }) => {
-				res.status(204).end();
-			},
-		);
-		for (const key of Object.keys(sessions)) {
-			(
-				sessions[key].transport as unknown as { handleRequest: typeof handleRequest }
-			).handleRequest = handleRequest;
-		}
-		app.get('/mcp', createSessionRequestHandler(sessions));
-		app.delete('/mcp', createSessionRequestHandler(sessions));
-		return { app, handleRequest };
-	}
-
-	function fakeSession(): SessionRegistry {
-		return {
-			'sid-1': {
-				transport: {} as unknown as SessionRegistry[string]['transport'],
-				activeRequests: 0,
-			},
-		};
-	}
-
-	it('returns 400 when mcp-session-id header is missing', async () => {
-		const { app } = buildApp({});
-		const res = await request(app).get('/mcp');
-		expect(res.status).toBe(400);
+describe('toOriginHostnames', () => {
+	it('reduces a configured origin to its hostname', () => {
+		expect(toOriginHostnames(['https://wiki.example.org'])).toEqual(['wiki.example.org']);
 	});
 
-	it('returns 400 when the session id is not known', async () => {
-		const { app } = buildApp(fakeSession());
-		const res = await request(app).get('/mcp').set('mcp-session-id', 'sid-unknown');
-		expect(res.status).toBe(400);
+	it('normalises the spellings that an exact-origin match used to reject', () => {
+		expect(
+			toOriginHostnames([
+				'https://wiki.example.org/',
+				'https://wiki.example.org/mcp',
+				'https://wiki.example.org:443',
+				'HTTPS://WIKI.EXAMPLE.ORG',
+				'wiki.example.org',
+				// `host:port` parses as a scheme with an opaque path, yielding an
+				// empty hostname instead of throwing, so it needs the retry path.
+				'wiki.example.org:8443',
+			]),
+		).toEqual(['wiki.example.org']);
 	});
 
-	it('forwards a GET to transport.handleRequest with a valid session id and no bearer', async () => {
-		const { app, handleRequest } = buildApp(fakeSession());
-		const res = await request(app).get('/mcp').set('mcp-session-id', 'sid-1');
-		expect(res.status).toBe(204);
-		expect(handleRequest).toHaveBeenCalledTimes(1);
+	it('keeps the brackets on an IPv6 loopback origin, with or without a scheme', () => {
+		expect(toOriginHostnames(['http://[::1]:3000'])).toEqual(['[::1]']);
+		expect(toOriginHostnames(['[::1]:3000'])).toEqual(['[::1]']);
+		expect(toOriginHostnames(['[::1]'])).toEqual(['[::1]']);
 	});
 
-	it('forwards a GET regardless of which bearer it carries', async () => {
-		const { app, handleRequest } = buildApp(fakeSession());
-		const res = await request(app)
-			.get('/mcp')
-			.set('mcp-session-id', 'sid-1')
-			.set('Authorization', 'Bearer any-token');
-		expect(res.status).toBe(204);
-		expect(handleRequest).toHaveBeenCalledTimes(1);
+	it('reads a bare host:port for the loopback spellings an operator is likely to write', () => {
+		expect(toOriginHostnames(['localhost:3000', '127.0.0.1:3000'])).toEqual([
+			'localhost',
+			'127.0.0.1',
+		]);
 	});
 
-	it('forwards a DELETE with a valid session id and no bearer', async () => {
-		const { app, handleRequest } = buildApp(fakeSession());
-		const res = await request(app).delete('/mcp').set('mcp-session-id', 'sid-1');
-		expect(res.status).toBe(204);
-		expect(handleRequest).toHaveBeenCalledTimes(1);
+	// A browser sends the punycode form in the Origin header, so a Unicode entry
+	// has to be folded to match rather than compared verbatim.
+	it('punycodes an internationalised hostname', () => {
+		expect(toOriginHostnames(['exämple.com'])).toEqual(['xn--exmple-cua.com']);
+		expect(toOriginHostnames(['https://exämple.com'])).toEqual(['xn--exmple-cua.com']);
+	});
+
+	it('skips blank entries', () => {
+		expect(toOriginHostnames(['', '   ', 'http://localhost:3000'])).toEqual(['localhost']);
+	});
+
+	it('drops an entry no hostname can be read from rather than adding an unmatchable one', () => {
+		const warn = vi.spyOn(logger, 'warning').mockImplementation(() => {});
+		expect(toOriginHostnames(['https://', 'wiki.example.org'])).toEqual(['wiki.example.org']);
+		expect(warn.mock.calls[0][0]).toContain('https://');
+		warn.mockRestore();
 	});
 });
 
-describe('POST to an existing session (per-request bearer)', () => {
-	function buildApp(sessions: SessionRegistry): {
-		app: Express;
-		handleRequest: ReturnType<typeof vi.fn>;
-	} {
-		const app = express();
-		app.use(express.json());
-		const handleRequest = vi.fn(
-			async (
-				_req: unknown,
-				res: { status: (n: number) => { end: () => void } },
-				_body: unknown,
-			) => {
-				res.status(202).end();
-			},
-		);
-		for (const key of Object.keys(sessions)) {
-			(
-				sessions[key].transport as unknown as { handleRequest: typeof handleRequest }
-			).handleRequest = handleRequest;
-		}
-		app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer));
-		return { app, handleRequest };
-	}
-
-	function stubCreateServer(): McpServer {
-		return new McpServer({ name: 'post-test-server', version: '0.0.0' }, { capabilities: {} });
-	}
-
-	function fakeSession(): SessionRegistry {
-		return {
-			'sid-1': {
-				transport: {} as unknown as SessionRegistry[string]['transport'],
-				activeRequests: 0,
-			},
-		};
-	}
-
-	it('accepts a POST carrying a bearer that differs from the one that initialized the session', async () => {
-		const { app, handleRequest } = buildApp(fakeSession());
-		const res = await request(app)
-			.post('/mcp')
-			.set('mcp-session-id', 'sid-1')
-			.set('Authorization', 'Bearer a-different-token')
-			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
-		expect(res.status).not.toBe(401);
-		expect(res.status).toBe(202);
-		expect(handleRequest).toHaveBeenCalledTimes(1);
-	});
-
-	it('accepts a POST to an existing session with no bearer at all', async () => {
-		const { app, handleRequest } = buildApp(fakeSession());
-		const res = await request(app)
-			.post('/mcp')
-			.set('mcp-session-id', 'sid-1')
-			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
-		expect(res.status).not.toBe(401);
-		expect(res.status).toBe(202);
-		expect(handleRequest).toHaveBeenCalledTimes(1);
-	});
-});
-
-describe('origin validation (transport-level)', () => {
+describe('origin validation (middleware)', () => {
 	const initializeBody = {
 		jsonrpc: '2.0',
 		id: 1,
@@ -291,24 +192,30 @@ describe('origin validation (transport-level)', () => {
 		},
 	};
 
-	function stubCreateServer(): McpServer {
-		return new McpServer({ name: 'origin-test-server', version: '0.0.0' }, { capabilities: {} });
-	}
-
-	function buildApp(allowedOrigins: string[] | undefined): Express {
+	// Attaches the guard per route, as the real buildApp does. Mounting it on the
+	// '/mcp' prefix instead would also cover the authorization-server routes; the
+	// proxy suite covers that specifically.
+	function buildApp(allowedOrigins: readonly string[]): Express {
 		const app = express();
 		app.use(express.json());
-		const sessions: SessionRegistry = {};
-		app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer, { allowedOrigins }));
+		const guard = [resolveMcpOriginValidation(allowedOrigins)];
+		const handler = createMcpHandler(
+			() => new McpServer({ name: 'origin-test-server', version: '0.0.0' }, { capabilities: {} }),
+			{ legacy: 'stateless' },
+		);
+		app.post('/mcp', ...guard, createMcpRouteHandler(handler));
 		return app;
 	}
 
+	function post(app: Express, origin?: string): request.Test {
+		const req = request(app).post('/mcp').set('Accept', 'application/json, text/event-stream');
+		return origin === undefined
+			? req.send(initializeBody)
+			: req.set('Origin', origin).send(initializeBody);
+	}
+
 	it('returns 403 with a JSON-RPC error body when the Origin header is not in the allowlist', async () => {
-		const res = await request(buildApp(['http://good.example']))
-			.post('/mcp')
-			.set('Accept', 'application/json, text/event-stream')
-			.set('Origin', 'http://evil.example')
-			.send(initializeBody);
+		const res = await post(buildApp(['http://good.example']), 'http://evil.example');
 		expect(res.status).toBe(403);
 		expect(res.body?.jsonrpc).toBe('2.0');
 		expect(res.body?.id).toBeNull();
@@ -318,39 +225,51 @@ describe('origin validation (transport-level)', () => {
 	});
 
 	it('does not reject when the Origin header matches an allowlist entry', async () => {
-		const res = await request(buildApp(['http://good.example']))
-			.post('/mcp')
-			.set('Accept', 'application/json, text/event-stream')
-			.set('Origin', 'http://good.example')
-			.send(initializeBody);
+		const res = await post(buildApp(['http://good.example']), 'http://good.example');
 		expect(res.status).not.toBe(403);
 	});
 
-	it('does not reject on Origin when the allowlist is undefined', async () => {
-		const res = await request(buildApp(undefined))
-			.post('/mcp')
-			.set('Accept', 'application/json, text/event-stream')
-			.set('Origin', 'http://anything.example')
-			.send(initializeBody);
+	// The match is on hostname, so a different port or scheme on an allowed host
+	// passes where the previous exact-origin comparison would have rejected it.
+	it('accepts another port on an allowlisted host', async () => {
+		const res = await post(buildApp(['https://good.example']), 'https://good.example:8443');
 		expect(res.status).not.toBe(403);
 	});
 
-	it('does not reject on Origin when the header is absent', async () => {
-		const res = await request(buildApp(['http://good.example']))
-			.post('/mcp')
-			.set('Accept', 'application/json, text/event-stream')
-			.send(initializeBody);
-		expect(res.status).not.toBe(403);
+	it('rejects an Origin header that cannot be parsed', async () => {
+		const res = await post(buildApp(['http://good.example']), 'not-a-url');
+		expect(res.status).toBe(403);
+		expect(res.body?.error?.message).toMatch(/origin/i);
 	});
+
+	// An empty allowlist is the non-loopback default. It must refuse the browser
+	// request rather than wave it through, which is what an absent guard did.
+	it('rejects any Origin when the allowlist is empty', async () => {
+		const res = await post(buildApp([]), 'http://anything.example');
+		expect(res.status).toBe(403);
+	});
+
+	// The spec conditions the 403 on the header being present, so every
+	// non-browser client is untouched by the allowlist, empty or not.
+	it.each([[['http://good.example']], [[]]])(
+		'does not reject when the Origin header is absent (allowlist %j)',
+		async (origins) => {
+			const res = await post(buildApp(origins));
+			expect(res.status).not.toBe(403);
+		},
+	);
 });
 
 describe('request body size cap', () => {
 	function buildApp(limit: string): Express {
 		const app = express();
 		app.use(express.json({ limit }));
-		app.use(payloadTooLargeHandler(limit));
+		app.use(errorHandler(limit));
 		app.post('/mcp', (req, res) => {
 			res.status(200).json({ ok: true, length: JSON.stringify(req.body).length });
+		});
+		app.post('/mcp/register', (_req, res) => {
+			res.status(201).json({ ok: true });
 		});
 		return app;
 	}
@@ -384,301 +303,170 @@ describe('request body size cap', () => {
 		expect(res.status).toBe(413);
 		expect(res.headers['content-type']).toMatch(/application\/json/);
 		expect(res.body?.jsonrpc).toBe('2.0');
-		expect(res.body?.id).toBeNull();
-		expect(typeof res.body?.error?.code).toBe('number');
+		// The id is omitted, never null: this revision admits only a string or a
+		// number, and body-parser aborted before any id could be read.
+		expect('id' in res.body).toBe(false);
+		expect(res.body?.error?.code).toBe(PAYLOAD_TOO_LARGE_ERROR_CODE);
 		expect(res.body?.error?.message).toMatch(/50kb/);
+	});
+
+	it('returns an OAuth 413, not a JSON-RPC one, on an authorization-server route', async () => {
+		const res = await request(buildApp('50kb'))
+			.post('/mcp/register')
+			.set('Content-Type', 'application/json')
+			.send(jsonRpcEnvelope(200 * 1024));
+		expect(res.status).toBe(413);
+		expect(res.body?.jsonrpc).toBeUndefined();
+		expect(res.body?.error).toBe('invalid_request');
+		expect(res.body?.error_description).toMatch(/50kb/);
 	});
 });
 
-describe('payloadTooLargeHandler', () => {
-	it('sends a JSON-RPC 413 when err.type is entity.too.large', () => {
-		const handler = payloadTooLargeHandler('1mb');
-		const next = vi.fn();
-		const tooLargeErr = Object.assign(new Error('too large'), { type: 'entity.too.large' });
-		const json = vi.fn();
-		const status = vi.fn(() => ({ json }));
-		const res = { status };
-		handler(tooLargeErr, {} as never, res as never, next as never);
-		expect(next).not.toHaveBeenCalled();
-		expect(status).toHaveBeenCalledWith(413);
-		expect(json).toHaveBeenCalledWith({
+describe('malformed JSON body', () => {
+	function buildApp(): Express {
+		const app = express();
+		app.use(express.json());
+		app.use(errorHandler('1mb'));
+		app.post('/mcp', (_req, res) => {
+			res.status(200).json({ ok: true });
+		});
+		app.post('/mcp/register', (_req, res) => {
+			res.status(201).json({ ok: true });
+		});
+		return app;
+	}
+
+	function postBroken(path: string): request.Test {
+		return request(buildApp()).post(path).set('Content-Type', 'application/json').send('{"a":');
+	}
+
+	it('returns a JSON-RPC parse error on the MCP endpoint', async () => {
+		const res = await postBroken('/mcp');
+		expect(res.status).toBe(400);
+		expect(res.headers['content-type']).toMatch(/application\/json/);
+		expect(res.body).toEqual({
 			jsonrpc: '2.0',
-			error: {
-				code: -32000,
-				message: 'Request body exceeds the configured maximum size of 1mb',
-			},
-			id: null,
+			error: { code: PARSE_ERROR, message: 'Request body is not valid JSON' },
 		});
 	});
 
-	it('forwards non-413 errors to the next handler', () => {
-		const handler = payloadTooLargeHandler('1mb');
-		const next = vi.fn();
-		const otherErr = new Error('unrelated');
-		const res = { status: vi.fn(), json: vi.fn() };
-		handler(otherErr, {} as never, res as never, next as never);
-		expect(next).toHaveBeenCalledWith(otherErr);
-		expect(res.status).not.toHaveBeenCalled();
-		expect(res.json).not.toHaveBeenCalled();
+	it('returns an OAuth error, not a JSON-RPC one, on an authorization-server route', async () => {
+		const res = await postBroken('/mcp/register');
+		expect(res.status).toBe(400);
+		expect(res.headers['content-type']).toMatch(/application\/json/);
+		expect(res.body?.jsonrpc).toBeUndefined();
+		expect(res.body?.error).toBe('invalid_request');
 	});
 
-	it('forwards a non-error-shaped value (string) to next', () => {
-		const handler = payloadTooLargeHandler('1mb');
+	// Express routes case-insensitively by default, so these spellings reach the
+	// MCP handler and must be answered in its dialect rather than OAuth's.
+	it.each(['/MCP', '/Mcp', '/mcp/'])('answers %s in the JSON-RPC dialect', async (path) => {
+		const res = await postBroken(path);
+		expect(res.status).toBe(400);
+		expect(res.body?.jsonrpc).toBe('2.0');
+		expect(res.body?.error?.code).toBe(PARSE_ERROR);
+	});
+
+	it('never leaks a stack trace', async () => {
+		for (const path of ['/mcp', '/mcp/register']) {
+			const res = await postBroken(path);
+			expect(res.text).not.toMatch(/SyntaxError|at JSON\.parse/);
+		}
+	});
+});
+
+describe('errorHandler', () => {
+	const mcpReq = { path: '/mcp' } as never;
+
+	// Terminal: nothing may reach Express's finalhandler, which answers HTML and
+	// leaks absolute paths in a stack trace outside production.
+	it('answers an unrecognised error as JSON without serialising it', () => {
+		const handler = errorHandler('1mb');
 		const next = vi.fn();
-		handler('oops' as never, {} as never, {} as never, next as never);
-		expect(next).toHaveBeenCalledWith('oops');
+		const json = vi.fn();
+		const status = vi.fn(() => ({ json }));
+		handler(new Error('boom at /home/someone/secret'), mcpReq, { status } as never, next as never);
+		expect(next).not.toHaveBeenCalled();
+		expect(status).toHaveBeenCalledWith(500);
+		const body = JSON.stringify(json.mock.calls[0][0]);
+		expect(body).not.toMatch(/boom|secret/);
+		expect(json).toHaveBeenCalledWith(
+			expect.objectContaining({ error: expect.objectContaining({ code: INTERNAL_ERROR }) }),
+		);
+	});
+
+	it('answers a non-error-shaped value without serialising it', () => {
+		const handler = errorHandler('1mb');
+		const next = vi.fn();
+		const json = vi.fn();
+		const status = vi.fn(() => ({ json }));
+		handler('oops' as never, mcpReq, { status } as never, next as never);
+		expect(next).not.toHaveBeenCalled();
+		expect(status).toHaveBeenCalledWith(500);
+		expect(JSON.stringify(json.mock.calls[0][0])).not.toMatch(/oops/);
+	});
+
+	it('honours an Express-supplied status', () => {
+		const handler = errorHandler('1mb');
+		const json = vi.fn();
+		const status = vi.fn(() => ({ json }));
+		const err = Object.assign(new Error('unsupported charset'), { status: 415 });
+		handler(err, mcpReq, { status } as never, vi.fn() as never);
+		expect(status).toHaveBeenCalledWith(415);
+	});
+
+	// Express matches `/mcp` non-strictly, so the trailing-slash form reaches the
+	// MCP route and must get the MCP envelope with it.
+	it('treats the trailing-slash form of the MCP path as the MCP endpoint', () => {
+		const handler = errorHandler('1mb');
+		const json = vi.fn();
+		const res = { status: vi.fn(() => ({ json })) };
+		const parseErr = Object.assign(new SyntaxError('bad'), { type: 'entity.parse.failed' });
+		handler(parseErr, { path: '/mcp/' } as never, res as never, vi.fn() as never);
+		expect(json).toHaveBeenCalledWith(
+			expect.objectContaining({
+				error: { code: PARSE_ERROR, message: 'Request body is not valid JSON' },
+			}),
+		);
+	});
+});
+
+// MCP forbids new codes in the -32000..-32019 sub-range and directs codes for
+// purposes it does not define outside the JSON-RPC reserved range altogether.
+describe('transport-emitted JSON-RPC error codes', () => {
+	it.each([
+		['authentication required', AUTHENTICATION_REQUIRED_ERROR_CODE],
+		['upstream unavailable', UPSTREAM_UNAVAILABLE_ERROR_CODE],
+		['payload too large', PAYLOAD_TOO_LARGE_ERROR_CODE],
+	])('%s sits outside the reserved range', (_name, code) => {
+		expect(code).toBeGreaterThan(-32000);
+	});
+
+	it('allocates a distinct code per condition', () => {
+		const codes = [
+			AUTHENTICATION_REQUIRED_ERROR_CODE,
+			UPSTREAM_UNAVAILABLE_ERROR_CODE,
+			PAYLOAD_TOO_LARGE_ERROR_CODE,
+		];
+		expect(new Set(codes).size).toBe(codes.length);
 	});
 });
 
 describe('withRequestContext', () => {
-	it('propagates bearer token and session id into the async store', async () => {
+	it('propagates the bearer token into the async store', async () => {
 		let observedToken: string | undefined;
-		let observedSession: string | undefined;
-		await withRequestContext('tok123', 'sess123', async () => {
+		await withRequestContext('tok123', async () => {
 			observedToken = getRuntimeToken();
-			observedSession = getSessionId();
 		});
 		expect(observedToken).toBe('tok123');
-		expect(observedSession).toBe('sess123');
 	});
 
-	it('omits both when neither is supplied', async () => {
+	it('leaves the store tokenless when no bearer is supplied', async () => {
 		let observedToken: string | undefined;
-		let observedSession: string | undefined;
-		await withRequestContext(undefined, undefined, async () => {
+		await withRequestContext(undefined, async () => {
 			observedToken = getRuntimeToken();
-			observedSession = getSessionId();
 		});
 		expect(observedToken).toBeUndefined();
-		expect(observedSession).toBeUndefined();
-	});
-
-	it('allows token without session and vice versa', async () => {
-		await withRequestContext('tok-only', undefined, async () => {
-			expect(getRuntimeToken()).toBe('tok-only');
-			expect(getSessionId()).toBeUndefined();
-		});
-		await withRequestContext(undefined, 'sess-only', async () => {
-			expect(getRuntimeToken()).toBeUndefined();
-			expect(getSessionId()).toBe('sess-only');
-		});
-	});
-});
-
-describe('markSessionActive / markSessionIdle (idle expiry)', () => {
-	function sessionWithCloseSpy(): {
-		sessions: SessionRegistry;
-		close: ReturnType<typeof vi.fn>;
-	} {
-		const sessions: SessionRegistry = {};
-		// Mirror the real transport.close() -> onclose -> delete sessions[id] chain
-		// from createMcpPostHandler, so the test exercises registry removal too.
-		const transport = {
-			onclose: undefined as (() => void) | undefined,
-		} as unknown as SessionRegistry[string]['transport'] & { onclose?: () => void };
-		const close = vi.fn(() => {
-			transport.onclose?.();
-			return Promise.resolve();
-		});
-		(transport as { close: unknown }).close = close;
-		transport.onclose = () => {
-			delete sessions['sid-1'];
-		};
-		sessions['sid-1'] = { transport, activeRequests: 0 };
-		return { sessions, close };
-	}
-
-	it('does not close while a request is active (no timer armed)', () => {
-		vi.useFakeTimers();
-		try {
-			const { sessions, close } = sessionWithCloseSpy();
-			markSessionActive(sessions, 'sid-1');
-			expect(sessions['sid-1'].idleTimer).toBeUndefined();
-			vi.advanceTimersByTime(10_000);
-			expect(close).not.toHaveBeenCalled();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('arms the idle timer once the request goes idle, then closes and removes the entry', () => {
-		vi.useFakeTimers();
-		try {
-			const { sessions, close } = sessionWithCloseSpy();
-			markSessionActive(sessions, 'sid-1');
-			markSessionIdle(sessions, 'sid-1', 1000);
-			expect(close).not.toHaveBeenCalled();
-			vi.advanceTimersByTime(1000);
-			expect(close).toHaveBeenCalledTimes(1);
-			expect(sessions['sid-1']).toBeUndefined();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('keeps the session alive while at least one request is still in-flight', () => {
-		vi.useFakeTimers();
-		try {
-			const { sessions, close } = sessionWithCloseSpy();
-			// Two concurrent requests (e.g. a held-open GET SSE stream plus a POST).
-			markSessionActive(sessions, 'sid-1');
-			markSessionActive(sessions, 'sid-1');
-			// First one finishes — still one in-flight, no timer.
-			markSessionIdle(sessions, 'sid-1', 1000);
-			expect(sessions['sid-1'].idleTimer).toBeUndefined();
-			vi.advanceTimersByTime(5000);
-			expect(close).not.toHaveBeenCalled();
-			// Second one finishes — now idle, timer arms and fires.
-			markSessionIdle(sessions, 'sid-1', 1000);
-			vi.advanceTimersByTime(1000);
-			expect(close).toHaveBeenCalledTimes(1);
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('never arms a timer when the timeout is 0 (expiry disabled)', () => {
-		vi.useFakeTimers();
-		try {
-			const { sessions, close } = sessionWithCloseSpy();
-			markSessionActive(sessions, 'sid-1');
-			markSessionIdle(sessions, 'sid-1', 0);
-			expect(sessions['sid-1'].idleTimer).toBeUndefined();
-			vi.advanceTimersByTime(10_000_000);
-			expect(close).not.toHaveBeenCalled();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-
-	it('is a no-op for an unknown session id', () => {
-		vi.useFakeTimers();
-		try {
-			const { sessions } = sessionWithCloseSpy();
-			expect(() => markSessionActive(sessions, 'sid-unknown')).not.toThrow();
-			expect(() => markSessionIdle(sessions, 'sid-unknown', 1000)).not.toThrow();
-		} finally {
-			vi.useRealTimers();
-		}
-	});
-});
-
-describe('idle-counter wiring through the HTTP handlers', () => {
-	function stubCreateServer(): McpServer {
-		return new McpServer({ name: 'idle-wiring-server', version: '0.0.0' }, { capabilities: {} });
-	}
-
-	// supertest resolves its promise on the HTTP response, but the handler's
-	// markSessionIdle runs on the response's 'close' event, which can fire a
-	// tick later. Mirror the createInFlightCounter abort test's setImmediate
-	// drain so the post-close registry state is observable.
-	async function afterResponseClosed(): Promise<void> {
-		await new Promise((r) => setImmediate(r));
-	}
-
-	it('balances activeRequests back to 0 after a POST to an existing session', async () => {
-		const app = express();
-		app.use(express.json());
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { end: () => void } }) => {
-				res.status(202).end();
-			},
-		);
-		// transport.sessionId must be populated: the POST handler's res.on('close')
-		// reads it to route markSessionIdle back to this registry entry.
-		const transport = {
-			sessionId: 'sid-1',
-			handleRequest,
-		} as unknown as SessionRegistry[string]['transport'];
-		const sessions: SessionRegistry = { 'sid-1': { transport, activeRequests: 0 } };
-		app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer, { idleTimeoutMs: 0 }));
-
-		const res = await request(app)
-			.post('/mcp')
-			.set('mcp-session-id', 'sid-1')
-			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
-		await afterResponseClosed();
-
-		expect(res.status).toBe(202);
-		// markSessionActive (+1) and the res.on('close') -> markSessionIdle (-1)
-		// balanced out — the request did not leak an in-flight count.
-		expect(sessions['sid-1'].activeRequests).toBe(0);
-	});
-
-	it('balances activeRequests back to 0 after a new-session initialize POST', async () => {
-		const app = express();
-		app.use(express.json());
-		const sessions: SessionRegistry = {};
-		app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer, { idleTimeoutMs: 0 }));
-
-		const res = await request(app)
-			.post('/mcp')
-			.set('Accept', 'application/json, text/event-stream')
-			.send({
-				jsonrpc: '2.0',
-				id: 1,
-				method: 'initialize',
-				params: {
-					protocolVersion: '2025-11-25',
-					capabilities: {},
-					clientInfo: { name: 'idle-wiring-client', version: '0.0.0' },
-				},
-			});
-		await afterResponseClosed();
-
-		expect(res.status).toBe(200);
-		const created = Object.keys(sessions);
-		expect(created).toHaveLength(1);
-		// onsessioninitialized seeds activeRequests: 1; the init request's
-		// res.on('close') -> markSessionIdle must decrement it back to 0
-		// rather than leaving the fresh session stuck at 1.
-		expect(sessions[created[0]].activeRequests).toBe(0);
-	});
-
-	it('balances activeRequests back to 0 after a GET to an existing session', async () => {
-		const app = express();
-		app.use(express.json());
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { end: () => void } }) => {
-				res.status(204).end();
-			},
-		);
-		const transport = {
-			sessionId: 'sid-1',
-			handleRequest,
-		} as unknown as SessionRegistry[string]['transport'];
-		const sessions: SessionRegistry = { 'sid-1': { transport, activeRequests: 0 } };
-		app.get('/mcp', createSessionRequestHandler(sessions, 0));
-
-		const res = await request(app).get('/mcp').set('mcp-session-id', 'sid-1');
-		await afterResponseClosed();
-
-		expect(res.status).toBe(204);
-		// markSessionActive (+1) and res.on('close') -> markSessionIdle (-1)
-		// balanced out for the GET path too.
-		expect(sessions['sid-1'].activeRequests).toBe(0);
-	});
-
-	it('balances activeRequests back to 0 after a DELETE to an existing session', async () => {
-		const app = express();
-		app.use(express.json());
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { end: () => void } }) => {
-				res.status(204).end();
-			},
-		);
-		const transport = {
-			sessionId: 'sid-1',
-			handleRequest,
-		} as unknown as SessionRegistry[string]['transport'];
-		const sessions: SessionRegistry = { 'sid-1': { transport, activeRequests: 0 } };
-		app.delete('/mcp', createSessionRequestHandler(sessions, 0));
-
-		const res = await request(app).delete('/mcp').set('mcp-session-id', 'sid-1');
-		await afterResponseClosed();
-
-		expect(res.status).toBe(204);
-		expect(sessions['sid-1'].activeRequests).toBe(0);
 	});
 });
 
@@ -723,5 +511,25 @@ describe('createInFlightCounter', () => {
 		const a = createInFlightCounter();
 		const b = createInFlightCounter();
 		expect(a.count).not.toBe(b.count);
+	});
+
+	it('does not count a subscriptions/listen POST (held-open stream must not block drain)', async () => {
+		const app = express();
+		app.use(express.json());
+		const inFlight = createInFlightCounter();
+		app.use('/mcp', inFlight.middleware);
+		app.post('/mcp', (_req, res) => {
+			res.json({ count: inFlight.count() });
+		});
+
+		const listen = await request(app)
+			.post('/mcp')
+			.send({ jsonrpc: '2.0', id: 1, method: 'subscriptions/listen', params: {} });
+		expect(listen.body.count).toBe(0);
+
+		const other = await request(app)
+			.post('/mcp')
+			.send({ jsonrpc: '2.0', id: 2, method: 'tools/list', params: {} });
+		expect(other.body.count).toBe(1);
 	});
 });

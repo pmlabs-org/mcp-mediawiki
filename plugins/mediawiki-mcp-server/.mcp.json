@@ -1,0 +1,14 @@
+{
+  "mcpServers": {
+    "mediawiki": {
+      "command": "npx",
+      "args": [
+        "-y",
+        "@professional-wiki/mediawiki-mcp-server@latest"
+      ],
+      "env": {
+        "CONFIG": "${user_config.configPath}"
+      }
+    }
+  }
+}

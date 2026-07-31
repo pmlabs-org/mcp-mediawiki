@@ -1,12 +1,12 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { FetchError } from 'node-fetch';
-import { createMockMwn } from '../helpers/mock-mwn.js';
-import { createMockMwnError } from '../helpers/mock-mwn-error.js';
-import { fakeContext } from '../helpers/fakeContext.js';
+import { createMockMwn } from '../helpers/mock-mwn.ts';
+import { createMockMwnError } from '../helpers/mock-mwn-error.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
 
-vi.mock('../../src/transport/httpFetch.js', async () => {
-	const actual = await vi.importActual<typeof import('../../src/transport/httpFetch.js')>(
-		'../../src/transport/httpFetch.js',
+vi.mock('../../src/transport/httpFetch.ts', async () => {
+	const actual = await vi.importActual<typeof import('../../src/transport/httpFetch.ts')>(
+		'../../src/transport/httpFetch.ts',
 	);
 	return { ...actual, fetchFileBytes: vi.fn() };
 });
@@ -15,10 +15,10 @@ import {
 	fetchFileBytes,
 	FileTooLargeError,
 	HttpStatusError,
-} from '../../src/transport/httpFetch.js';
-import { uploadFileFromUrl } from '../../src/tools/upload-file-from-url.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.js';
+} from '../../src/transport/httpFetch.ts';
+import { uploadFileFromUrl } from '../../src/tools/upload-file-from-url.ts';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
 
 const UPLOAD_OK = {
 	result: 'Success',
@@ -29,18 +29,16 @@ const UPLOAD_OK = {
 	},
 };
 
+// fakeContext's edit slice throws on any method a test leaves unstubbed.
+const baseEdit = fakeContext().edit;
+
 function ctxWithServerUpload(
 	mock: ReturnType<typeof createMockMwn>,
 	submitUploadFromBytes = vi.fn().mockResolvedValue(UPLOAD_OK),
 ) {
 	return fakeContext({
 		mwn: async () => mock as never,
-		edit: {
-			submit: vi.fn() as never,
-			submitUpload: vi.fn() as never,
-			submitUploadFromBytes: submitUploadFromBytes as never,
-			applyTags: (o: object) => ({ ...o }),
-		},
+		edit: { ...baseEdit, submitUploadFromBytes },
 	});
 }
 
@@ -171,10 +169,9 @@ describe('upload-file-from-url', () => {
 		const ctx = fakeContext({
 			mwn: async () => mock as never,
 			edit: {
-				submit: vi.fn() as never,
-				submitUpload: vi.fn() as never,
-				submitUploadFromBytes: vi.fn() as never,
-				applyTags: (o: object) => ({ ...o, tags: 'mcp-server' }),
+				...baseEdit,
+				submitUploadFromBytes: vi.fn(),
+				applyTags: <T extends Record<string, unknown>>(o: T) => ({ ...o, tags: 'mcp-server' }),
 			},
 		});
 

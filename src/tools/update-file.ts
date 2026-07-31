@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { assertAllowedPath, UploadValidationError } from '../transport/uploadGuard.js';
-import { assertFileExists, FileNotFoundError } from '../transport/fileExistence.js';
-import { formatEditComment, buildPageUrl } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { assertAllowedPath, UploadValidationError } from '../transport/uploadGuard.ts';
+import { assertFileExists, FileNotFoundError } from '../transport/fileExistence.ts';
+import { formatEditComment, buildPageUrl } from '../wikis/utils.ts';
 
 const inputSchema = {
 	filepath: z.string().describe('File path on the local disk'),
@@ -25,7 +25,7 @@ export const updateFile: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: false,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'update file',
 	target: (a) => a.title,
 
@@ -53,7 +53,7 @@ export const updateFile: Tool<typeof inputSchema> = {
 		}
 
 		const params: ApiUploadParams = {
-			comment: formatEditComment('update-file', comment),
+			comment: formatEditComment(ctx, 'update-file', comment),
 			ignorewarnings: true,
 		};
 		const data: ApiUploadResponse = await ctx.edit.submitUpload(

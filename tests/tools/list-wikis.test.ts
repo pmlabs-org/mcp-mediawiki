@@ -1,11 +1,11 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
-import type { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
-import { dispatch } from '../../src/runtime/dispatcher.js';
-import { listWikis } from '../../src/tools/list-wikis.js';
-import { fakeContext } from '../helpers/fakeContext.js';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import { dispatch } from '../../src/runtime/dispatcher.ts';
+import { listWikis } from '../../src/tools/list-wikis.ts';
+import { fakeContext } from '../helpers/fakeContext.ts';
 
 const fetchMetadata = vi.fn();
-vi.mock('../../src/auth/metadata.js', () => ({
+vi.mock('../../src/auth/metadata.ts', () => ({
 	fetchMetadata: (...args: unknown[]) => fetchMetadata(...args) as unknown,
 }));
 
@@ -58,6 +58,10 @@ function wikisOf(result: CallToolResult): Array<Record<string, unknown>> {
 }
 
 describe('list-wikis', () => {
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
 	beforeEach(() => {
 		fetchMetadata.mockReset();
 		mwnSpy.mockReset();
@@ -95,7 +99,28 @@ describe('list-wikis', () => {
 		expect(cargo.extensionTools).toEqual([]);
 	});
 
+	it('withholds the authorization server unless forwarding a caller token is enabled', async () => {
+		fetchMetadata.mockResolvedValue({ issuer: 'https://oauth.wiki' });
+		const ctx = ctxWith({}, new Set(), {
+			'oauth-wiki': {
+				sitename: 'OAuth',
+				server: 'https://oauth.wiki',
+				articlepath: '/wiki',
+				scriptpath: '/w',
+				oauth2ClientId: 'cid',
+			},
+		});
+
+		const result = await dispatch(listWikis, ctx)({} as never);
+
+		// Naming the issuer would send a client to mint a token this server refuses.
+		const wiki = wikisOf(result).find((w) => w.key === 'oauth-wiki')!;
+		expect(wiki.authorizationServer).toBeUndefined();
+		expect(fetchMetadata).not.toHaveBeenCalled();
+	});
+
 	it('reports the authorization server issuer for an OAuth-configured wiki', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
 		fetchMetadata.mockResolvedValue({ issuer: 'https://oauth.wiki' });
 		const ctx = ctxWith({}, new Set(), {
 			'oauth-wiki': {
@@ -147,6 +172,7 @@ describe('list-wikis', () => {
 	});
 
 	it('omits authorizationServer for a wiki whose metadata fetch fails, without failing the call', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
 		fetchMetadata.mockImplementation((key: string) => {
 			if (key === 'broken-wiki') {
 				return Promise.reject(new Error('metadata unavailable'));

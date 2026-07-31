@@ -1,8 +1,8 @@
-import type { CallToolResult, TextContent } from '@modelcontextprotocol/sdk/types.js';
-import type { ErrorEnvelope } from '../results/schemas.js';
-import type { ErrorCategory } from '../errors/classifyError.js';
-import { formatPayload } from './format.js';
-import type { TruncationInfo } from './truncation.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { ErrorEnvelope } from '../results/schemas.ts';
+import type { ErrorCategory } from '../errors/classifyError.ts';
+import { formatPayload } from './format.ts';
+import type { TruncationInfo } from './truncation.ts';
 
 export interface ResponseFormatter {
 	ok(payload: unknown): CallToolResult;
@@ -16,11 +16,10 @@ export interface ResponseFormatter {
 
 export function structuredResult(data: unknown): CallToolResult {
 	return {
-		content: [{ type: 'text', text: formatPayload(data) } as TextContent],
+		content: [{ type: 'text', text: formatPayload(data) }],
 		// structuredContent mirrors the typed payload so the dispatcher can detect
 		// truncation via the `truncation` field without reparsing the rendered text.
-		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- MCP structuredContent shape; constructed from typed inputs
-		structuredContent: data as Record<string, unknown>,
+		structuredContent: data,
 	};
 }
 
@@ -36,7 +35,7 @@ export function errorResult(
 	const envelope: ErrorEnvelope =
 		code !== undefined ? { category, message, code } : { category, message };
 	return {
-		content: [{ type: 'text', text: JSON.stringify(envelope) } as TextContent],
+		content: [{ type: 'text', text: JSON.stringify(envelope) }],
 		isError: true,
 	};
 }

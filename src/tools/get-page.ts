@@ -1,10 +1,10 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { buildPageUrl } from '../wikis/utils.js';
-import { ContentFormat } from '../results/contentFormat.js';
-import { truncateByBytes, type TruncationInfo } from '../results/truncation.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { buildPageUrl } from '../wikis/utils.ts';
+import { ContentFormat } from '../results/contentFormat.ts';
+import { truncateByBytes, type TruncationInfo } from '../results/truncation.ts';
 
 const inputSchema = {
 	title: z.string().describe('Wiki page title'),
@@ -41,7 +41,7 @@ export const getPage: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'retrieve page data',
 	target: (a) => a.title,
 

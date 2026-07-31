@@ -1,7 +1,7 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
 
 const inputSchema = {
 	includeRights: z
@@ -45,7 +45,7 @@ export const whoami: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'read user identity',
 
 	async handle(args: WhoamiArgs, ctx: ToolContext): Promise<CallToolResult> {

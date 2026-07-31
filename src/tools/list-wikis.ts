@@ -1,8 +1,9 @@
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { extensionPacks } from './extensions/index.js';
-import { fetchMetadata } from '../auth/metadata.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { extensionPacks } from './extensions/index.ts';
+import { bearerPassthroughEnabled } from '../runtime/authShape.ts';
+import { fetchMetadata } from '../auth/metadata.ts';
 
 interface WikiSummary {
 	key: string;
@@ -13,7 +14,10 @@ interface WikiSummary {
 	reachable: boolean;
 	// Tool names from every extension pack the wiki supports; order is not significant.
 	extensionTools: string[];
-	// AS issuer for an OAuth-configured wiki; absent otherwise.
+	// Where a caller obtains a token for this wiki. Reported only while forwarding a
+	// caller-supplied token is enabled, since that is the only shape in which the
+	// answer is actionable: otherwise the server refuses such a token, and pointing
+	// at the issuer would send a client to mint one it cannot use.
 	authorizationServer?: string;
 }
 
@@ -28,7 +32,7 @@ export const listWikis: Tool<Record<string, never>> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	wikiScoped: false,
 	failureVerb: 'list wikis',
 
@@ -52,7 +56,11 @@ export const listWikis: Tool<Record<string, never>> = {
 					}
 				}
 				let authorizationServer: string | undefined;
-				if (typeof config.oauth2ClientId === 'string' && config.oauth2ClientId.trim() !== '') {
+				if (
+					bearerPassthroughEnabled() &&
+					typeof config.oauth2ClientId === 'string' &&
+					config.oauth2ClientId.trim() !== ''
+				) {
 					try {
 						const md = await fetchMetadata(key, {
 							server: config.server,

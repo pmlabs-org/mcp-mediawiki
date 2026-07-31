@@ -3,13 +3,13 @@ import * as http from 'node:http';
 import { randomBytes } from 'node:crypto';
 import type { AddressInfo } from 'node:net';
 import open from 'open';
-import { logger } from '../runtime/logger.js';
-import { fetchMetadata } from './metadata.js';
-import type { WikiSlice } from './metadata.js';
-import { randomVerifier, s256 } from './pkce.js';
-import { exchangeCode, OAuthFlowError } from './oauthFlow.js';
-import { createTokenStore } from './tokenStore.js';
-import { renderPage } from './pageShell.js';
+import { logger } from '../runtime/logger.ts';
+import { fetchMetadata } from './metadata.ts';
+import type { WikiSlice } from './metadata.ts';
+import { randomVerifier, s256 } from './pkce.ts';
+import { exchangeCode, OAuthFlowError } from './oauthFlow.ts';
+import { createTokenStore } from './tokenStore.ts';
+import { renderPage } from './pageShell.ts';
 
 const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
 
@@ -298,6 +298,10 @@ interface TimeoutHandle {
 	cancel: () => void;
 }
 
+// A rejecting deadline, and so safe only while every caller attaches a handler
+// in the same tick it is created, as doBrowserAuth does: Node ends the process
+// over a rejection nobody is subscribed to. A new deadline is better built to
+// resolve instead, as the /ready probe's is, since that needs no guard at all.
 function timeout(ms: number): TimeoutHandle {
 	let timer: ReturnType<typeof setTimeout> | undefined;
 	const promise = new Promise<never>((_, reject) => {

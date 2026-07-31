@@ -6,10 +6,14 @@ import {
 	isMetricsEnabled,
 	recordToolCall,
 	recordReadyFailure,
-	setSessionsProvider,
+	setInFlightProvider,
+	setSubscriptionStreamsProvider,
 	getMetricsHandler,
 	__resetMetricsForTesting,
-} from '../../src/runtime/metrics.js';
+	recordStoreFlush,
+	recordStoreFlushFailure,
+	setProxyStoreStatsProvider,
+} from '../../src/runtime/metrics.ts';
 
 describe('metrics module — disabled state', () => {
 	beforeEach(() => {
@@ -27,7 +31,13 @@ describe('metrics module — disabled state', () => {
 			}),
 		).not.toThrow();
 		expect(() => recordReadyFailure()).not.toThrow();
-		expect(() => setSessionsProvider(() => 0)).not.toThrow();
+		expect(() => setInFlightProvider(() => 0)).not.toThrow();
+		expect(() => setSubscriptionStreamsProvider(() => 0)).not.toThrow();
+		expect(() => recordStoreFlush(1)).not.toThrow();
+		expect(() => recordStoreFlushFailure()).not.toThrow();
+		expect(() =>
+			setProxyStoreStatsProvider(() => ({ upstreamTokens: 0, clients: 0 })),
+		).not.toThrow();
 	});
 
 	it('getMetricsHandler returns undefined before init', () => {
@@ -132,19 +142,59 @@ describe('metrics module — enabled state', () => {
 		expect(body).toMatch(/mcp_ready_failures_total 2/);
 	});
 
-	it('mcp_active_sessions reads provider lazily at scrape', async () => {
+	it('mcp_inflight_requests reads provider lazily at scrape', async () => {
 		let count = 3;
-		setSessionsProvider(() => count);
+		setInFlightProvider(() => count);
 		let body = await scrape();
-		expect(body).toMatch(/mcp_active_sessions 3/);
+		expect(body).toMatch(/mcp_inflight_requests 3/);
 		count = 7;
 		body = await scrape();
-		expect(body).toMatch(/mcp_active_sessions 7/);
+		expect(body).toMatch(/mcp_inflight_requests 7/);
 	});
 
-	it('mcp_active_sessions reports 0 when no provider set', async () => {
+	it('mcp_subscription_streams reads provider lazily at scrape', async () => {
+		setSubscriptionStreamsProvider(() => 2);
 		const body = await scrape();
-		expect(body).toMatch(/mcp_active_sessions 0/);
+		expect(body).toMatch(/mcp_subscription_streams 2/);
+	});
+
+	it('both replacement gauges report 0 when no provider set', async () => {
+		const body = await scrape();
+		expect(body).toMatch(/mcp_inflight_requests 0/);
+		expect(body).toMatch(/mcp_subscription_streams 0/);
+	});
+
+	it('observes mcp_proxy_store_flush_duration_seconds', async () => {
+		recordStoreFlush(5);
+		recordStoreFlush(5);
+		const body = await scrape();
+		expect(body).toContain('mcp_proxy_store_flush_duration_seconds_count 2');
+		expect(body).toContain('mcp_proxy_store_flush_duration_seconds_sum 0.01');
+	});
+
+	it('mcp_proxy_store gauges read the stats provider lazily at scrape', async () => {
+		let stats = { upstreamTokens: 2, clients: 1 };
+		setProxyStoreStatsProvider(() => stats);
+		let body = await scrape();
+		expect(body).toMatch(/mcp_proxy_store_upstream_tokens 2/);
+		expect(body).toMatch(/mcp_proxy_store_clients 1/);
+		stats = { upstreamTokens: 5, clients: 3 };
+		body = await scrape();
+		expect(body).toMatch(/mcp_proxy_store_upstream_tokens 5/);
+		expect(body).toMatch(/mcp_proxy_store_clients 3/);
+	});
+
+	it('counts mcp_proxy_store_flush_failures_total', async () => {
+		recordStoreFlushFailure();
+		recordStoreFlushFailure();
+		const body = await scrape();
+		expect(body).toMatch(/mcp_proxy_store_flush_failures_total 2/);
+	});
+
+	it('mcp_proxy_store gauges report 0 when no provider set', async () => {
+		const body = await scrape();
+		expect(body).toMatch(/mcp_proxy_store_upstream_tokens 0/);
+		expect(body).toMatch(/mcp_proxy_store_clients 0/);
 	});
 
 	it('initMetrics is idempotent', async () => {

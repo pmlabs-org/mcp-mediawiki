@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../../../runtime/tool.js';
-import type { ToolContext } from '../../../runtime/context.js';
-import type { TruncationInfo } from '../../../results/truncation.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../../../runtime/tool.ts';
+import type { ToolContext } from '../../../runtime/context.ts';
+import type { TruncationInfo } from '../../../results/truncation.ts';
 
 const DEFAULT_LIMIT = 50;
 const MAX_LIMIT = 200;
@@ -60,7 +60,7 @@ export const smwListProperties: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'list SMW properties',
 
 	async handle({ search, limit, continueFrom }, ctx: ToolContext): Promise<CallToolResult> {

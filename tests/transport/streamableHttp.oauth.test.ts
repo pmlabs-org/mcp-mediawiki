@@ -1,46 +1,15 @@
-import { describe, it, expect, afterEach, vi } from 'vitest';
-
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test',
-					server: 'https://test.example',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = () => Promise.reject(new Error('mwn not available in tests'));
-		invalidate = () => {};
-	},
-}));
+import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
 import express, { type Express } from 'express';
 import request from 'supertest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-	createOAuthProtectedResourceHandler,
-	createMcpPostHandler,
-	type SessionRegistry,
-} from '../../src/transport/streamableHttp.js';
-import type { WikiRegistry } from '../../src/wikis/wikiRegistry.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
-import { _resetMetadataCacheForTesting } from '../../src/auth/metadata.js';
-import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.js';
+import { createMcpHandler, McpServer } from '@modelcontextprotocol/server';
+import { createOAuthProtectedResourceHandler } from '../../src/transport/streamableHttp.ts';
+import { createMcpRouteHandler, type McpRouteOptions } from '../../src/transport/mcpRoute.ts';
+import { AUTHENTICATION_REQUIRED_ERROR_CODE } from '../../src/transport/errorCodes.ts';
+import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
+import { _resetMetadataCacheForTesting } from '../../src/auth/metadata.ts';
+import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 
 function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry {
 	return {
@@ -52,25 +21,38 @@ function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry 
 	} as unknown as WikiRegistry;
 }
 
-function buildWellKnownApp(registry: WikiRegistry): Express {
+// `issuer` stands in for a whole ProxyConfig: the protected-resource document is
+// the only consumer here and it reads nothing else.
+function buildWellKnownApp(registry: WikiRegistry, issuer?: string): Express {
 	const app = express();
 	app.use(express.json());
 	app.get(
 		'/.well-known/oauth-protected-resource',
-		createOAuthProtectedResourceHandler({ wikiRegistry: registry }),
+		createOAuthProtectedResourceHandler({
+			wikiRegistry: registry,
+			getProxyConfig: () => (issuer === undefined ? null : ({ issuer } as never)),
+		}),
 	);
 	return app;
 }
 
-function stubCreateServer(): McpServer {
-	return new McpServer({ name: 'oauth-test-server', version: '0.0.0' }, { capabilities: {} });
-}
+const PROXY_ISSUER = 'https://mcp.example/mcp';
 
-function buildMcpApp(registry: WikiRegistry): Express {
+// Enough of a ProxyConfig for the route to report that a protected-resource
+// document exists. The challenge only advertises resource_metadata when one does.
+const WITH_PROXY = { getProxyConfig: () => ({ issuer: PROXY_ISSUER }) as never };
+
+function buildMcpApp(
+	registry?: WikiRegistry,
+	options: Omit<McpRouteOptions, 'wikiRegistry'> = {},
+): Express {
 	const app = express();
 	app.use(express.json());
-	const sessions: SessionRegistry = {};
-	app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer, { wikiRegistry: registry }));
+	const handler = createMcpHandler(
+		() => new McpServer({ name: 'oauth-test-server', version: '0.0.0' }, { capabilities: {} }),
+		{ legacy: 'stateless' },
+	);
+	app.post('/mcp', createMcpRouteHandler(handler, { wikiRegistry: registry, ...options }));
 	return app;
 }
 
@@ -83,7 +65,7 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 		fakeAs = undefined;
 	});
 
-	it('returns 200 with authorization_servers when a wiki has oauth2ClientId', async () => {
+	it('advertises the proxy issuer when the hosted proxy is enabled', async () => {
 		fakeAs = await startFakeAs();
 		const wikiCfg: Partial<WikiConfig> = {
 			sitename: 'OAuthWiki',
@@ -93,13 +75,15 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 			oauth2ClientId: 'my-client-id',
 		};
 		const registry = fakeRegistry({ mywiki: wikiCfg });
-		const app = buildWellKnownApp(registry);
+		const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 		const res = await request(app).get('/.well-known/oauth-protected-resource');
 		expect(res.status).toBe(200);
-		expect(res.body.authorization_servers).toBeDefined();
-		expect(Array.isArray(res.body.authorization_servers)).toBe(true);
-		expect(res.body.authorization_servers[0]).toBe(fakeAs.url);
+		// This server is the authorization server, so it names itself. The wiki's own
+		// issuer is deliberately never advertised: a client minting a token there and
+		// presenting it here is the shape the passthrough prohibition forbids.
+		expect(res.body.authorization_servers).toEqual([PROXY_ISSUER]);
+		expect(res.body.authorization_servers).not.toContain(fakeAs.url);
 		expect(res.body.bearer_methods_supported).toEqual(['header']);
 	});
 
@@ -111,7 +95,7 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 			articlepath: '/wiki',
 		};
 		const registry = fakeRegistry({ plain: wikiCfg });
-		const app = buildWellKnownApp(registry);
+		const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 		const res = await request(app).get('/.well-known/oauth-protected-resource');
 		expect(res.status).toBe(404);
@@ -126,7 +110,7 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 			oauth2ClientId: '',
 		};
 		const registry = fakeRegistry({ empty: wikiCfg });
-		const app = buildWellKnownApp(registry);
+		const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 		const res = await request(app).get('/.well-known/oauth-protected-resource');
 		expect(res.status).toBe(404);
@@ -142,7 +126,7 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 			oauth2ClientId: 'my-client-id',
 		};
 		const registry = fakeRegistry({ mywiki: wikiCfg });
-		const app = buildWellKnownApp(registry);
+		const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 		// MCP_PUBLIC_URL not set; resource is derived from host header and proto
 		const res = await request(app)
@@ -154,38 +138,27 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 		expect(res.body.resource).toBe('https://mcp.example.org');
 	});
 
-	it('lists every OAuth wiki authorization server when two wikis use different servers', async () => {
+	it('is not served at all when the proxy is disabled', async () => {
 		fakeAs = await startFakeAs();
-		const fakeAs2 = await startFakeAs();
-		try {
-			const wikiCfgA: Partial<WikiConfig> = {
-				sitename: 'WikiA',
-				server: fakeAs.url,
-				scriptpath: '/w',
-				articlepath: '/wiki',
-				oauth2ClientId: 'client-a',
-			};
-			const wikiCfgB: Partial<WikiConfig> = {
-				sitename: 'WikiB',
-				server: fakeAs2.url,
-				scriptpath: '/w',
-				articlepath: '/wiki',
-				oauth2ClientId: 'client-b',
-			};
-			const registry = fakeRegistry({ wikiA: wikiCfgA, wikiB: wikiCfgB });
-			const app = buildWellKnownApp(registry);
+		const app = buildWellKnownApp(
+			fakeRegistry({
+				mywiki: {
+					sitename: 'OAuthWiki',
+					server: fakeAs.url,
+					scriptpath: '/w',
+					articlepath: '/wiki',
+					oauth2ClientId: 'my-client-id',
+				},
+			}),
+		);
 
-			const res = await request(app).get('/.well-known/oauth-protected-resource');
-			expect(res.status).toBe(200);
-			expect(res.body.authorization_servers).toContain(fakeAs.url);
-			expect(res.body.authorization_servers).toContain(fakeAs2.url);
-			expect(res.body.authorization_servers).toHaveLength(2);
-		} finally {
-			await fakeAs2.close();
-		}
+		const res = await request(app).get('/.well-known/oauth-protected-resource');
+
+		expect(res.status).toBe(404);
+		expect(fakeAs.metadataRequests.count).toBe(0);
 	});
 
-	it('still includes a reachable wiki AS when another wiki metadata fetch rejects', async () => {
+	it('still serves the document when one wiki metadata fetch rejects', async () => {
 		fakeAs = await startFakeAs();
 		// A second AS that explicitly advertises a non-S256 PKCE method makes
 		// fetchMetadata reject with MetadataError; Promise.allSettled keeps it
@@ -209,11 +182,14 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 				oauth2ClientId: 'client-bad',
 			};
 			const registry = fakeRegistry({ reachable: reachable, rejecting: rejecting });
-			const app = buildWellKnownApp(registry);
+			const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 			const res = await request(app).get('/.well-known/oauth-protected-resource');
+			// Upstream metadata is still fetched, for scopes_supported, so one wiki
+			// being unreachable must not take the whole document down. Neither wiki's
+			// issuer appears in it — this server names only itself.
 			expect(res.status).toBe(200);
-			expect(res.body.authorization_servers).toContain(fakeAs.url);
+			expect(res.body.authorization_servers).toEqual([PROXY_ISSUER]);
 			expect(res.body.authorization_servers).not.toContain(badAs.url);
 		} finally {
 			await badAs.close();
@@ -233,7 +209,7 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 				oauth2ClientId: 'client-bad',
 			};
 			const registry = fakeRegistry({ rejecting: rejecting });
-			const app = buildWellKnownApp(registry);
+			const app = buildWellKnownApp(registry, PROXY_ISSUER);
 
 			const res = await request(app).get('/.well-known/oauth-protected-resource');
 			expect(res.status).toBe(503);
@@ -245,6 +221,13 @@ describe('GET /.well-known/oauth-protected-resource', () => {
 });
 
 describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
+	// The challenge tells a caller to supply a wiki token, which is only actionable
+	// while forwarding one is available. Without the opt-in there is nothing a
+	// client can do, so the challenge is not emitted at all.
+	beforeEach(() => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
+	});
+
 	afterEach(() => {
 		delete process.env.MCP_ALLOW_STATIC_FALLBACK;
 		vi.unstubAllEnvs();
@@ -258,7 +241,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 			articlepath: '/wiki',
 			oauth2ClientId: 'client-id-123',
 		};
-		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }));
+		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }), WITH_PROXY);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -267,7 +250,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 
 		expect(res.status).toBe(401);
 		expect(res.body?.jsonrpc).toBe('2.0');
-		expect(res.body?.error?.code).toBe(-32001);
+		expect(res.body?.error?.code).toBe(AUTHENTICATION_REQUIRED_ERROR_CODE);
 		const wwwAuth = res.headers['www-authenticate'];
 		expect(typeof wwwAuth).toBe('string');
 		expect(wwwAuth).toMatch(/^Bearer /);
@@ -275,6 +258,28 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 		expect(wwwAuth).toMatch(/realm="MediaWiki MCP Server"/);
 		expect(wwwAuth).toMatch(/resource_metadata="/);
 		expect(wwwAuth).toMatch(/\/.well-known\/oauth-protected-resource"/);
+	});
+
+	it('omits resource_metadata when no protected-resource document is served', async () => {
+		const wikiCfg: Partial<WikiConfig> = {
+			sitename: 'OAuthWiki',
+			server: 'https://wiki.example',
+			scriptpath: '/w',
+			articlepath: '/wiki',
+			oauth2ClientId: 'client-id-123',
+		};
+		// No proxy, so /.well-known/oauth-protected-resource answers 404. Advertising
+		// it would send an RFC 9728 client to a document that does not exist.
+		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }));
+
+		const res = await request(app)
+			.post('/mcp')
+			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+
+		expect(res.status).toBe(401);
+		const challenge = res.headers['www-authenticate'] ?? '';
+		expect(challenge).toContain('Bearer error="invalid_token"');
+		expect(challenge).not.toContain('resource_metadata');
 	});
 
 	it('does NOT return 401 when the wiki has no oauth2ClientId', async () => {
@@ -296,10 +301,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 
 	it('does NOT return 401 when wikiRegistry is not provided to handler', async () => {
 		// If wikiRegistry is omitted entirely, the 401 check is skipped
-		const app = express();
-		app.use(express.json());
-		const sessions: SessionRegistry = {};
-		app.post('/mcp', createMcpPostHandler(sessions, stubCreateServer, {}));
+		const app = buildMcpApp(undefined);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -309,7 +311,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 		expect(res.status).not.toBe(401);
 	});
 
-	it('does NOT return 401 when bearer is present even with oauth2ClientId set', async () => {
+	it('does NOT return 401 when a bearer is present and forwarding is opted into', async () => {
 		const wikiCfg: Partial<WikiConfig> = {
 			sitename: 'OAuthWiki',
 			server: 'https://wiki.example',
@@ -398,7 +400,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 			articlepath: '/wiki',
 			oauth2ClientId: 'client-id-123',
 		};
-		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }));
+		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }), WITH_PROXY);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -424,7 +426,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 			articlepath: '/wiki',
 			oauth2ClientId: 'client-id-123',
 		};
-		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }));
+		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }), WITH_PROXY);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -448,7 +450,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 			articlepath: '/wiki',
 			oauth2ClientId: 'client-id-123',
 		};
-		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }));
+		const app = buildMcpApp(fakeRegistry({ mywiki: wikiCfg }), WITH_PROXY);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -485,7 +487,7 @@ describe('POST /mcp 401 short-circuit when every wiki requires auth', () => {
 			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
 
 		expect(res.status).toBe(401);
-		expect(res.body?.error?.code).toBe(-32001);
+		expect(res.body?.error?.code).toBe(AUTHENTICATION_REQUIRED_ERROR_CODE);
 		const wwwAuth = res.headers['www-authenticate'];
 		expect(typeof wwwAuth).toBe('string');
 		expect(wwwAuth).toMatch(/^Bearer /);

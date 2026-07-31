@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { createTokenStore } from '../auth/tokenStore.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { createTokenStore } from '../auth/tokenStore.ts';
 
 const inputSchema = {
 	wiki: z.string().optional().describe('Wiki key to log out from. Omit to log out from all wikis.'),
@@ -20,7 +20,7 @@ export const oauthLogout: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: false,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'log out',
 
 	async handle({ wiki }, ctx: ToolContext): Promise<CallToolResult> {

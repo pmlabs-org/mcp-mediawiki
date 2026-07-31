@@ -1,8 +1,9 @@
+import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { emitStartupBanner } from '../../src/runtime/banner.js';
-import type { WikiRegistry } from '../../src/wikis/wikiRegistry.js';
-import type { ActiveWiki } from '../../src/wikis/activeWiki.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
+import { emitStartupBanner } from '../../src/runtime/banner.ts';
+import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
+import type { ActiveWiki } from '../../src/wikis/activeWiki.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
 
 const baseWikiConfig: WikiConfig = {
 	sitename: 'A',
@@ -26,7 +27,7 @@ const mockActiveWiki: ActiveWiki = {
 
 const mockUploadDirs = { list: () => [] };
 
-function captureLines(spy: ReturnType<typeof vi.spyOn>): Record<string, unknown>[] {
+function captureLines(spy: StderrWriteSpy): Record<string, unknown>[] {
 	return spy.mock.calls
 		.map((c) => String(c[0]))
 		.filter((s) => s.startsWith('{'))
@@ -34,7 +35,7 @@ function captureLines(spy: ReturnType<typeof vi.spyOn>): Record<string, unknown>
 }
 
 describe('startup banner', () => {
-	let stderrSpy: ReturnType<typeof vi.spyOn>;
+	let stderrSpy: StderrWriteSpy;
 
 	beforeEach(() => {
 		vi.stubEnv('MCP_LOG_LEVEL', 'debug');
@@ -98,7 +99,8 @@ describe('startup banner', () => {
 		expect(e.transport).toBe('http');
 		expect(e.host).toBe('0.0.0.0');
 		expect(e.port).toBe(8080);
-		expect(e.auth_shape).toBe('bearer-passthrough');
+		// Plain HTTP with no static credentials and no opted-in forwarding.
+		expect(e.auth_shape).toBe('anonymous');
 		expect(e.allowed_hosts).toEqual(['wiki.example.org']);
 		expect(e.allowed_origins).toEqual(['https://wiki.example.org']);
 		expect(e.max_request_body).toBe('2mb');

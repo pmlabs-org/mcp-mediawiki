@@ -1,7 +1,8 @@
 import * as fs from 'fs';
 import * as path from 'path';
-import { logger } from '../runtime/logger.js';
-import { errorMessage } from '../errors/isErrnoException.js';
+import { logger } from '../runtime/logger.ts';
+import { errorMessage } from '../errors/isErrnoException.ts';
+import { wikiKeyProblem, wikiKeyProblemMessage } from '../runtime/wikiKey.ts';
 
 export interface WikiConfig {
 	/**
@@ -91,9 +92,27 @@ export interface WikiConfig {
 	 * the action, MediaWiki returns a badtags error and the write fails.
 	 */
 	tags?: string | string[] | null;
+	/**
+	 * Whether write actions made through this MCP server carry the
+	 * `(via <tool> on MediaWiki MCP Server)` attribution suffix in their edit
+	 * summary. Defaults to true. Set to false to drop the suffix, leaving only
+	 * the caller-supplied comment — or an empty summary when none was given.
+	 * A change tag (`tags`) keeps MCP edits identifiable without the suffix when
+	 * you control the target wiki.
+	 */
+	attributeEdits?: boolean;
 }
 
-export type PublicWikiConfig = Omit<WikiConfig, 'token' | 'username' | 'password'>;
+/**
+ * The wiki fields safe to publish over MCP. Deliberately a `Pick`, not an
+ * `Omit` of the known secrets: subtracting secrets means every field added to
+ * `WikiConfig` later is published by default, which is how `oauth2ClientSecret`
+ * came to be served to clients. Adding a field here must be a decision.
+ */
+export type PublicWikiConfig = Pick<
+	WikiConfig,
+	'sitename' | 'server' | 'articlepath' | 'scriptpath' | 'private' | 'readOnly'
+>;
 
 export interface Config {
 	wikis: { [key: string]: WikiConfig };
@@ -335,6 +354,10 @@ function resolveConfig(parsed: unknown): Config {
 	}
 	const wikis: Record<string, WikiConfig> = {};
 	for (const [key, rawWiki] of Object.entries(rawWikis)) {
+		const problem = wikiKeyProblem(key);
+		if (problem !== undefined) {
+			throw new Error(`Config error: wiki key "${key}" ${wikiKeyProblemMessage(problem)}`);
+		}
 		wikis[key] = resolveWiki(rawWiki, key);
 	}
 	applyOAuth2ClientIdOverride(wikis, defaultWiki);
@@ -375,6 +398,11 @@ function applyOAuth2ClientSecretOverride(
 
 export function loadConfigFromFile(): Config {
 	if (!fs.existsSync(configPath)) {
+		if (process.env.CONFIG) {
+			logger.warning(
+				`CONFIG points at "${configPath}", which does not exist. Falling back to the built-in default configuration (English Wikipedia). A relative path resolves against the server's working directory.`,
+			);
+		}
 		return { ...defaultConfig, uploadDirs: resolveUploadDirs(undefined) };
 	}
 	const rawData = fs.readFileSync(configPath, 'utf-8');

@@ -1,13 +1,13 @@
 #!/usr/bin/env node
 
-import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
-import { logger } from '../runtime/logger.js';
-import { createServer } from '../server.js';
-import { emitStartupBanner } from '../runtime/banner.js';
-import { createToolContext } from '../runtime/createContext.js';
-import { registerShutdownHandlers } from '../runtime/shutdown.js';
-import { loadConfigFromFile } from '../config/loadConfig.js';
-import { createAppState } from '../wikis/state.js';
+import { serveStdio } from '@modelcontextprotocol/server/stdio';
+import { logger } from '../runtime/logger.ts';
+import { createServer } from '../server.ts';
+import { emitStartupBanner } from '../runtime/banner.ts';
+import { createToolContext } from '../runtime/createContext.ts';
+import { registerShutdownHandlers } from '../runtime/shutdown.ts';
+import { loadConfigFromFile } from '../config/loadConfig.ts';
+import { createAppState } from '../wikis/state.ts';
 
 async function main(): Promise<void> {
 	const config = loadConfigFromFile();
@@ -20,17 +20,23 @@ async function main(): Promise<void> {
 			uploadDirs: state.uploadDirs,
 		},
 	);
-	const transport = new StdioServerTransport();
 	const ctx = createToolContext({ logger, state, transport: 'stdio' });
-	const server = await createServer(ctx);
 
-	await server.connect(transport);
+	// serveStdio owns the connection: the opening exchange pins the era, one
+	// instance from the factory serves the connection's lifetime, and on a
+	// modern-pinned connection the entry rewrites outbound change
+	// notifications onto its subscriptions/listen streams — so the default
+	// change publisher in createServer covers both eras here.
+	const handle = serveStdio(() => createServer(ctx), {
+		onerror: (error) => logger.error(`stdio serving error: ${error.message}`),
+	});
+
 	// Stdio has no in-flight queue, so grace doesn't apply — log graceMs: 0
 	// to make that explicit in the shutdown event.
 	registerShutdownHandlers({
 		transport: 'stdio',
 		graceMs: 0,
-		stdioTransport: transport,
+		stdioTransport: handle,
 	});
 }
 

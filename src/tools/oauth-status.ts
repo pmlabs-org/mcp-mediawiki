@@ -1,7 +1,7 @@
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { createTokenStore } from '../auth/tokenStore.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { createTokenStore } from '../auth/tokenStore.ts';
 
 export const oauthStatus: Tool<Record<string, never>> = {
 	name: 'oauth-status',
@@ -15,7 +15,7 @@ export const oauthStatus: Tool<Record<string, never>> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: false,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'read OAuth status',
 
 	async handle(_args, ctx: ToolContext): Promise<CallToolResult> {

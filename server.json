@@ -3,7 +3,7 @@
   "name": "io.github.ProfessionalWiki/mediawiki-mcp-server",
   "title": "MediaWiki MCP Server",
   "description": "MCP server enabling AI clients to interact with any MediaWiki wiki through standard tools",
-  "version": "0.13.1",
+  "version": "0.16.0",
   "repository": {
     "url": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server",
     "source": "github"
@@ -11,8 +11,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases/download/v0.13.0/MediaWiki-MCP-Server.mcpb",
-      "fileSha256": "44e32e373dd2b5b609618680859d9d3fd943f946b703d6edbe0aa7f9ddb81935",
+      "identifier": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases/download/v0.16.0/MediaWiki-MCP-Server.mcpb",
+      "fileSha256": "ae3715da6524e93bb7029f88d4af200b8b944cce24477978563ed405bad160b8",
       "transport": {
         "type": "stdio"
       },
@@ -69,6 +69,10 @@
           "description": "Additional allowed redirect URIs for hosted-proxy client registration: comma-separated exact URIs (which must include a host) and https prefix patterns ending in /*. Loopback, claude.ai, and verified first-party clients (ChatGPT, Cursor, VS Code) are always allowed; unset means no additional clients."
         },
         {
+          "name": "MCP_OAUTH_CIMD_ALLOWED_HOSTS",
+          "description": "Comma-separated additional client_id document hosts trusted for CIMD (bare host or host:port). Verified first-party hosts are always trusted."
+        },
+        {
           "name": "MCP_OAUTH_CREDENTIALS_FILE",
           "description": "Override the default OAuth credentials store path. Default: ~/.config/mediawiki-mcp/credentials.json on Linux/macOS, %APPDATA%\\mediawiki-mcp\\credentials.json on Windows.",
           "format": "filepath"
@@ -78,14 +82,13 @@
           "description": "Set to '1' to skip launching a browser during the OAuth dance and log the auth URL to stderr instead. Useful in headless environments and CI."
         },
         {
-          "name": "MCP_PUBLIC_URL",
-          "description": "Override the request-derived public URL used in the protected-resource discovery doc and WWW-Authenticate header. Set this when running behind a proxy that rewrites the request Host."
+          "name": "MCP_OAUTH_PROXY_STORE_FILE",
+          "description": "Path to the hosted OAuth proxy's encrypted state file, which lets sign-ins survive restarts. Default: proxy-store.enc under the mediawiki-mcp config dir; /app/data/proxy-store.enc in the Docker image.",
+          "format": "filepath"
         },
         {
-          "name": "MCP_SESSION_IDLE_TIMEOUT",
-          "description": "Seconds an HTTP session may sit idle before it is closed and removed on the StreamableHTTP transport. Any request resets the timer. Set to 0 to disable expiry.",
-          "format": "number",
-          "default": "1800"
+          "name": "MCP_PUBLIC_URL",
+          "description": "Override the request-derived public URL used in the protected-resource discovery doc and WWW-Authenticate header. Set this when running behind a proxy that rewrites the request Host."
         },
         {
           "name": "MCP_SHUTDOWN_GRACE_MS",
@@ -119,7 +122,7 @@
     {
       "registryType": "npm",
       "identifier": "@professional-wiki/mediawiki-mcp-server",
-      "version": "0.13.0",
+      "version": "0.16.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"
@@ -177,6 +180,10 @@
           "description": "Additional allowed redirect URIs for hosted-proxy client registration: comma-separated exact URIs (which must include a host) and https prefix patterns ending in /*. Loopback, claude.ai, and verified first-party clients (ChatGPT, Cursor, VS Code) are always allowed; unset means no additional clients."
         },
         {
+          "name": "MCP_OAUTH_CIMD_ALLOWED_HOSTS",
+          "description": "Comma-separated additional client_id document hosts trusted for CIMD (bare host or host:port). Verified first-party hosts are always trusted."
+        },
+        {
           "name": "MCP_OAUTH_CREDENTIALS_FILE",
           "description": "Override the default OAuth credentials store path. Default: ~/.config/mediawiki-mcp/credentials.json on Linux/macOS, %APPDATA%\\mediawiki-mcp\\credentials.json on Windows.",
           "format": "filepath"
@@ -186,14 +193,13 @@
           "description": "Set to '1' to skip launching a browser during the OAuth dance and log the auth URL to stderr instead. Useful in headless environments and CI."
         },
         {
-          "name": "MCP_PUBLIC_URL",
-          "description": "Override the request-derived public URL used in the protected-resource discovery doc and WWW-Authenticate header. Set this when running behind a proxy that rewrites the request Host."
+          "name": "MCP_OAUTH_PROXY_STORE_FILE",
+          "description": "Path to the hosted OAuth proxy's encrypted state file, which lets sign-ins survive restarts. Default: proxy-store.enc under the mediawiki-mcp config dir; /app/data/proxy-store.enc in the Docker image.",
+          "format": "filepath"
         },
         {
-          "name": "MCP_SESSION_IDLE_TIMEOUT",
-          "description": "Seconds an HTTP session may sit idle before it is closed and removed on the StreamableHTTP transport. Any request resets the timer. Set to 0 to disable expiry.",
-          "format": "number",
-          "default": "1800"
+          "name": "MCP_PUBLIC_URL",
+          "description": "Override the request-derived public URL used in the protected-resource discovery doc and WWW-Authenticate header. Set this when running behind a proxy that rewrites the request Host."
         },
         {
           "name": "MCP_SHUTDOWN_GRACE_MS",

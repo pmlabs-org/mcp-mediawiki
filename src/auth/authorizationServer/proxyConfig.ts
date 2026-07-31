@@ -1,4 +1,5 @@
-import { parseRedirectAllowlist, type RedirectAllowlist } from './redirectPolicy.js';
+import { parseRedirectAllowlist, type RedirectAllowlist } from './redirectPolicy.ts';
+import { parseCimdAllowedHosts } from './cimd.ts';
 
 export class ProxyConfigError extends Error {
 	public constructor(message: string) {
@@ -23,13 +24,17 @@ export interface ProxyConfig {
 	consentTtlMs: number;
 	tokenTtlMs: number;
 	redirectAllowlist: RedirectAllowlist;
+	cimdAllowedHosts: string[];
 }
 
 const UPSTREAM_REFRESH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
 const DEFAULT_TOKEN_TTL_MS = 55 * 60 * 1000;
 const DEFAULT_CONSENT_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
-interface WikiSlice {
+// The slice of a wiki's config that resolveProxyConfig needs. Named distinctly
+// from metadata.ts's exported WikiSlice (the client-discovery slice): different
+// shape, different concern, and the two never meet at an import.
+interface ProxyWikiInput {
 	server: string;
 	scriptpath: string;
 	oauth2ClientId?: string | null;
@@ -43,7 +48,7 @@ function stripTrailingSlash(u: string): string {
 
 export function resolveProxyConfig(
 	_wikiKey: string,
-	wiki: WikiSlice,
+	wiki: ProxyWikiInput,
 	env: NodeJS.ProcessEnv,
 ): ProxyConfig | null {
 	const clientId = wiki.oauth2ClientId?.trim();
@@ -115,6 +120,15 @@ export function resolveProxyConfig(
 		);
 	}
 
+	let cimdAllowedHosts: string[];
+	try {
+		cimdAllowedHosts = parseCimdAllowedHosts(env.MCP_OAUTH_CIMD_ALLOWED_HOSTS);
+	} catch (e) {
+		throw new ProxyConfigError(
+			`MCP_OAUTH_CIMD_ALLOWED_HOSTS: ${e instanceof Error ? e.message : String(e)}`,
+		);
+	}
+
 	return {
 		issuer,
 		authorizeBase: stripTrailingSlash(wiki.publicServer?.trim() || wiki.server),
@@ -127,6 +141,7 @@ export function resolveProxyConfig(
 		consentTtlMs,
 		tokenTtlMs,
 		redirectAllowlist,
+		cimdAllowedHosts,
 	};
 }
 

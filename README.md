@@ -62,13 +62,6 @@ Every tool that operates on a wiki accepts an optional `wiki` argument naming th
 
 Each pack's tools register only on wikis where its extension is installed.
 
-**[Semantic MediaWiki](https://www.mediawiki.org/wiki/Extension:Semantic_MediaWiki)**
-
-| Name | Description |
-|---|---|
-| `smw-list-properties` | List Semantic MediaWiki properties with copy-paste templates for `smw-query`. |
-| `smw-query` | Run a Semantic MediaWiki `#ask` query. |
-
 **[NeoWiki](https://neowiki.ai/)**
 
 | Name | Description |
@@ -84,6 +77,13 @@ Each pack's tools register only on wikis where its extension is installed.
 | `neowiki-delete-subject` | Delete a subject by ID. Requires the `edit` right. |
 | `neowiki-set-main-subject` | Set or clear a page's main subject. Requires the `edit` right. |
 | `neowiki-validate-subject` | Dry-run validate a proposed subject and return violations. |
+
+**[Semantic MediaWiki](https://www.mediawiki.org/wiki/Extension:Semantic_MediaWiki)**
+
+| Name | Description |
+|---|---|
+| `smw-list-properties` | List Semantic MediaWiki properties with copy-paste templates for `smw-query`. |
+| `smw-query` | Run a Semantic MediaWiki `#ask` query. |
 
 **[Bucket](https://github.com/weirdgloop/mediawiki-extensions-Bucket)**
 
@@ -101,9 +101,9 @@ Each pack's tools register only on wikis where its extension is installed.
 
 ### Resources
 
-**`mcp://wikis/{wikiKey}`** — per-wiki resource exposing `sitename`, `server` (the wiki's public address), `articlepath`, `scriptpath`, and a `private` flag.
+**`mcp://wikis/{wikiKey}`** — per-wiki resource exposing `sitename`, `server` (the wiki's public address), `articlepath`, `scriptpath`, and the `private` and `readOnly` flags.
 
-- Credentials (`token`, `username`, `password`) are never exposed in resource content.
+- Those fields are the whole of it: the resource publishes a fixed list, so credentials and server-side settings in your configuration file are never exposed in resource content.
 - After `add-wiki` or `remove-wiki`, the server sends `notifications/resources/list_changed` so clients refresh.
 
 <details><summary>Example read result</summary>
@@ -122,25 +122,19 @@ Each pack's tools register only on wikis where its extension is installed.
 </details>
 
 ### Environment variables
+
+The variables below are relevant to any setup. Variables that only apply when self-hosting the HTTP transport (ports, timeouts, Host/Origin and SSRF guards) or running the hosted OAuth proxy are in [docs/deployment.md — environment variables](docs/deployment.md#environment-variables). Config-file substitution and upload-directory variables are in [docs/configuration.md](docs/configuration.md).
+
 | Name | Description | Default |
 |---|---|---|
 | `CONFIG` | Path to your configuration file | `config.json` |
-| `MCP_ALLOW_STATIC_FALLBACK` | Set to `true` to allow HTTP startup when `config.json` has static credentials. See [docs/deployment.md — security checklist](docs/deployment.md#security-checklist). | `unset` |
+| `MCP_TRANSPORT` | Type of MCP server transport (`stdio` or `http`) | `stdio` |
+| `MCP_LOG_LEVEL` | Minimum severity for logger output. One of `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`, or `silent`. | `debug` |
 | `MCP_CONTENT_MAX_BYTES` | Byte cap for content bodies (wikitext, rendered HTML, diffs). Tune to the target LLM client's tool-response budget. | `50000` |
 | `MCP_FILE_DATA_MAX_BYTES` | Hard cap on the base64-encoded size of a `get-file-data` response. A transport/safety backstop; tune the actual size per call with the tool's `width`. Over-cap calls error rather than truncate. | `1000000` |
 | `MCP_UPLOAD_MAX_BYTES` | Memory cap on the server-side fetch used by `upload-file-from-url` / `update-file-from-url`. Files larger than this are handed to the wiki's own copy-upload instead of being buffered by the server. Guards this server's memory, not the wiki's `$wgMaxUploadSize`. | `104857600` |
-| `MCP_LOG_LEVEL` | Minimum severity for logger output. One of `debug`, `info`, `notice`, `warning`, `error`, `critical`, `alert`, `emergency`, or `silent`. | `debug` |
-| `MCP_OAUTH_ALLOWED_REDIRECTS` | Additional OAuth redirect URIs the hosted proxy accepts at client registration: comma-separated exact URIs (each must include a host) and `https://…/*` prefix patterns. Loopback, claude.ai, and verified first-party clients are always allowed. See [docs/deployment.md — allowing more clients](docs/deployment.md#allowing-more-clients). | `unset` |
 | `MCP_OAUTH_CREDENTIALS_FILE` | Override the default credentials store path. Default: `~/.config/mediawiki-mcp/credentials.json` (Linux/macOS) or `%APPDATA%\mediawiki-mcp\credentials.json` (Windows). | `unset` |
 | `MCP_OAUTH_NO_BROWSER` | Set to `1` to skip launching a browser during the OAuth flow; the auth URL is logged to stderr instead. Useful in headless environments. | `unset` |
-| `MCP_PUBLIC_URL` | Override the request-derived public URL used in OAuth protected-resource discovery. Useful for reverse-proxy setups that rewrite the `Host` header. | `unset` |
-| `MCP_MAX_REQUEST_BODY` | Maximum HTTP request body size (StreamableHTTP transport). Accepts size strings like `512kb` or `1mb`. Oversize requests get a JSON-RPC 413. | `1mb` |
-| `MCP_METRICS` | Set to `true` to expose Prometheus metrics at `GET /metrics` on the HTTP transport. | `unset` |
-| `MCP_SESSION_IDLE_TIMEOUT` | Seconds an HTTP session may sit idle before it is closed and removed (StreamableHTTP transport). Any request resets the timer. `0` disables expiry. | `1800` |
-| `MCP_SHUTDOWN_GRACE_MS` | Maximum ms to wait for in-flight `/mcp` calls to drain on `SIGTERM` / `SIGINT`. See [docs/operations.md — Graceful shutdown](docs/operations.md#graceful-shutdown). | `10000` |
-| `MCP_TRANSPORT` | Type of MCP server transport (`stdio` or `http`) | `stdio` |
-| `MCP_TRUSTED_HOSTS` | Comma-separated hosts exempt from the **outbound** SSRF guard's public-IP check — for deliberately pointing the server at an internal destination such as a Docker-network alias (`mediawiki.svc`). Distinct from the inbound `MCP_ALLOWED_HOSTS`; see [Security](#security). | `unset` |
-| `PORT` | Port used for StreamableHTTP transport | `3000` |
 
 ## Configuration
 
@@ -172,7 +166,7 @@ For the full field reference, env-var substitution, secret sources, change tags,
 Tools marked 🔐 require authentication. Write tools (including extension-pack writes) are hidden from `tools/list` when the configured default wiki has `readOnly: true` — see [Deployment](#deployment).
 
 - **Browser-based OAuth (recommended).** Sign in through a browser tab the first time a tool needs auth. Set `oauth2ClientId` and `oauth2CallbackPort` per wiki — see [docs/configuration.md — OAuth (browser-based)](docs/configuration.md#oauth-browser-based).
-- **Per-request bearer token (HTTP).** Each request carries `Authorization: Bearer <token>`; the server forwards it to MediaWiki. See [docs/deployment.md — per-request bearer token](docs/deployment.md#per-request-bearer-token-http-transport).
+- **Per-request bearer token (HTTP), deprecated.** Each request carries `Authorization: Bearer <token>` and the server forwards it to MediaWiki. Off by default, because an MCP server must not accept tokens that were not issued for it. See [docs/deployment.md — per-request bearer token](docs/deployment.md#per-request-bearer-token-http-transport-deprecated).
 - **Hosted OAuth proxy (HTTP).** The server fronts one MediaWiki consumer as an OAuth 2.1 Authorization Server, so an OAuth-aware client signs each user in — no manual tokens. Point it at `https://<wiki>/mcp`; anonymous read still works. See [docs/deployment.md — hosted OAuth sign-in](docs/deployment.md#hosted-oauth-sign-in).
 - **Manual OAuth2 access token.** Paste a long-lived token into `config.json`. See [docs/configuration.md — manual OAuth2 access token](docs/configuration.md#manual-oauth2-access-token).
 - **Bot password.** Fallback when Extension:OAuth isn't installed. See [docs/configuration.md — bot password](docs/configuration.md#bot-password).
@@ -181,124 +175,106 @@ The Cargo tools (`cargo-query`, `cargo-list-tables`, `cargo-describe-table`) cal
 
 ## Installation
 
-<details>
-<summary><b>Install in Claude Desktop</b></summary>
+Pick your client below, or use the [standard configuration](#standard-configuration) if it is not listed. `CONFIG` is optional; without it the server targets English Wikipedia. To point it at your own wiki and set up authentication for writes, see [docs/configuration.md](docs/configuration.md).
 
-Follow the [guide](https://modelcontextprotocol.io/quickstart/user) and use the following configuration:
+### Claude Code
 
-```json
-{
-  "mcpServers": {
-    "mediawiki-mcp-server": {
-      "command": "npx",
-      "args": [
-        "@professional-wiki/mediawiki-mcp-server@latest"
-      ],
-      "env": {
-        "CONFIG": "path/to/config.json"
-      }
-    }
-  }
-}
+Add this repository as a plugin marketplace, then install the bundled server:
+
 ```
-</details>
+/plugin marketplace add ProfessionalWiki/MediaWiki-MCP-Server
+/plugin install mediawiki-mcp-server@professional-wiki
+```
 
-<details><summary><b>Install in VS Code</b></summary>
+The plugin takes an optional configuration file, which points the server at your own wiki. Set it from the prompt when enabling the plugin, or at any time with `/plugin configure mediawiki-mcp-server@professional-wiki`. A command-line install takes the same value via `claude plugin install mediawiki-mcp-server@professional-wiki --config configPath=path/to/config.json`.
 
-[![Install in VS Code](https://img.shields.io/badge/Add%20to-VS%20Code-blue?style=for-the-badge&labelColor=%230e1116&color=%234076b5)](https://insiders.vscode.dev/redirect?url=vscode%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522mediawiki-mcp-server%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522%2540professional-wiki%252Fmediawiki-mcp-server%2540latest%2522%255D%257D)
-[![Install in VS Code Insiders](https://img.shields.io/badge/Add%20to-VS%20Code%20Insiders-blue?style=for-the-badge&labelColor=%230e1116&color=%234f967e)](https://insiders.vscode.dev/redirect?url=vscode-insiders%3Amcp%2Finstall%3F%257B%2522name%2522%253A%2522mediawiki-mcp-server%2522%252C%2522command%2522%253A%2522npx%2522%252C%2522args%2522%253A%255B%2522%2540professional-wiki%252Fmediawiki-mcp-server%2540latest%2522%255D%257D)
+When installed as a plugin, the tools are namespaced `mcp__plugin_mediawiki-mcp-server_mediawiki__<tool>`; update any tool allowlists or hooks accordingly.
+
+To configure the server directly instead, see the [Claude Code MCP docs](https://docs.anthropic.com/en/docs/claude-code/mcp). The short version:
 
 ```bash
-code --add-mcp '{"name":"mediawiki-mcp-server","command":"npx","args":["@professional-wiki/mediawiki-mcp-server@latest"]}'
+claude mcp add mediawiki-mcp-server -- npx -y @professional-wiki/mediawiki-mcp-server@latest
+# Environment variables go before the `--`:
+claude mcp add mediawiki-mcp-server -e CONFIG=path/to/config.json -- npx -y @professional-wiki/mediawiki-mcp-server@latest
 ```
-</details>
 
-<details>
-<summary><b>Install in Cursor</b></summary>
+### Codex
 
-[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=mediawiki-mcp-server&config=eyJjb21tYW5kIjoibnB4IEBwcm9mZXNzaW9uYWwtd2lraS9tZWRpYXdpa2ktbWNwLXNlcnZlckBsYXRlc3QifQ%3D%3D)
-
-Go to `Cursor Settings` -> `MCP` -> `Add new MCP Server`. Name it to your liking, and use `command` type with the command `npx @professional-wiki/mediawiki-mcp-server`.
-
-```json
-{
-  "mcpServers": {
-    "mediawiki-mcp-server": {
-      "command": "npx",
-      "args": [
-        "@professional-wiki/mediawiki-mcp-server@latest"
-      ],
-      "env": {
-        "CONFIG": "path/to/config.json"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Install in Windsurf</b></summary>
-
-Follow the [guide](https://docs.windsurf.com/windsurf/cascade/mcp) and use the following configuration:
-
-```json
-{
-  "mcpServers": {
-    "mediawiki-mcp-server": {
-      "command": "npx",
-      "args": [
-        "@professional-wiki/mediawiki-mcp-server@latest"
-      ],
-      "env": {
-        "CONFIG": "path/to/config.json"
-      }
-    }
-  }
-}
-```
-</details>
-
-<details>
-<summary><b>Install in Claude Code</b></summary>
-
-Follow the [Claude Code MCP docs](https://docs.anthropic.com/en/docs/claude-code/mcp).
-
-Run the below command, optionally with `-e` flags to specify environment variables.
-
-    claude mcp add mediawiki-mcp-server npx @professional-wiki/mediawiki-mcp-server@latest
-
-You should end up with something like the below in your `.claude.json` config:
-
-```json
-"mcpServers": {
-  "mediawiki-mcp-server": {
-    "type": "stdio",
-    "command": "npx",
-    "args": [
-      "@professional-wiki/mediawiki-mcp-server@latest"
-    ],
-    "env": {
-      "CONFIG": "path/to/config.json"
-    }
-  }
-},
-```
-</details>
-
-<details>
-<summary><b>Install in Gemini CLI</b></summary>
-
-> 🐋 **Develop with Docker:** Replace the `npm run` part of the command with `make` (e.g. `make inspector`).
+Add this repository as a plugin marketplace, then install the bundled server:
 
 ```bash
-gemini extensions install https://github.com/ProfessionalWiki/MediaWiki-MCP-Server
+codex plugin marketplace add ProfessionalWiki/MediaWiki-MCP-Server
+codex plugin add mediawiki-mcp-server@professional-wiki
 ```
 
-This installs the extension from the latest GitHub Release. To pin a specific version, append `--ref=<tag>` (for example `--ref=v0.6.5`).
+To point the plugin at your own wiki, set `CONFIG` in the shell you launch Codex from, for example `export CONFIG=path/to/config.json`. Codex has no per-plugin configuration; if you would rather not set an environment variable, `codex mcp add mediawiki --env CONFIG=path/to/config.json -- npx -y @professional-wiki/mediawiki-mcp-server@latest` registers the server directly and takes precedence over the plugin's copy.
 
-See the [Gemini CLI extensions documentation](https://github.com/google-gemini/gemini-cli/tree/main/docs/extensions) for how to update, list, or uninstall extensions.
-</details>
+See the [Codex plugins documentation](https://developers.openai.com/codex/plugins) for how to list, update, or remove plugins.
+
+### Claude Desktop
+
+Download [MediaWiki-MCP-Server.mcpb](https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases/latest/download/MediaWiki-MCP-Server.mcpb) and double-click it to install the extension, which prompts for a configuration file path so you can point it at your own wiki instead of English Wikipedia.
+
+### VS Code and Cursor
+
+[![Install in VS Code](https://img.shields.io/badge/Add%20to-VS%20Code-blue?style=for-the-badge&labelColor=%230e1116&color=%234076b5)](https://insiders.vscode.dev/redirect/mcp/install?name=mediawiki-mcp-server&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40professional-wiki%2Fmediawiki-mcp-server%40latest%22%5D%7D)
+[![Install in VS Code Insiders](https://img.shields.io/badge/Add%20to-VS%20Code%20Insiders-blue?style=for-the-badge&labelColor=%230e1116&color=%234f967e)](https://insiders.vscode.dev/redirect/mcp/install?name=mediawiki-mcp-server&config=%7B%22command%22%3A%22npx%22%2C%22args%22%3A%5B%22-y%22%2C%22%40professional-wiki%2Fmediawiki-mcp-server%40latest%22%5D%7D&quality=insiders)
+[![Install in Cursor](https://cursor.com/deeplink/mcp-install-dark.svg)](https://cursor.com/install-mcp?name=mediawiki-mcp-server&config=eyJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsIkBwcm9mZXNzaW9uYWwtd2lraS9tZWRpYXdpa2ktbWNwLXNlcnZlckBsYXRlc3QiXX0%3D)
+
+Or add the [standard configuration](#standard-configuration) by hand.
+
+### Antigravity
+
+Add the [standard configuration](#standard-configuration) to Antigravity's MCP config, either globally in `~/.gemini/config/mcp_config.json` or per-workspace in `.agents/mcp_config.json`.
+
+If you previously installed the Gemini CLI extension, Antigravity's setup wizard offers to import your existing Gemini CLI configuration.
+
+### OpenCode
+
+OpenCode uses its own configuration shape rather than `mcpServers`; add this to `opencode.json` in your project root, or `~/.config/opencode/opencode.json` for a global install.
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "mcp": {
+    "mediawiki-mcp-server": {
+      "type": "local",
+      "command": ["npx", "-y", "@professional-wiki/mediawiki-mcp-server@latest"],
+      "environment": {
+        "CONFIG": "path/to/config.json"
+      }
+    }
+  }
+}
+```
+
+### Standard configuration
+
+Most clients read the same server block. Paste it into the file listed for your client, replacing `mcpServers` with that client's root key:
+
+| Client | Configuration file | Root key |
+| --- | --- | --- |
+| Cursor | `~/.cursor/mcp.json`, or `.cursor/mcp.json` per project | `mcpServers` |
+| VS Code | `.vscode/mcp.json` per workspace, or the **MCP: Open User Configuration** command | `servers` |
+| Devin Desktop (formerly Windsurf) | `~/.codeium/windsurf/mcp_config.json` | `mcpServers` |
+| Zed | `~/.config/zed/settings.json` | `context_servers` |
+| LM Studio | `~/.lmstudio/mcp.json` | `mcpServers` |
+
+```json
+{
+  "mcpServers": {
+    "mediawiki-mcp-server": {
+      "command": "npx",
+      "args": ["-y", "@professional-wiki/mediawiki-mcp-server@latest"],
+      "env": {
+        "CONFIG": "path/to/config.json"
+      }
+    }
+  }
+}
+```
+
+For any other client, `npx add-mcp @professional-wiki/mediawiki-mcp-server` may work: [add-mcp](https://github.com/neon-solutions/add-mcp) is a community CLI that writes your client's configuration file for you. It sets the launch command only; add `CONFIG` yourself to point at your own wiki.
 
 ## Deployment
 
@@ -308,7 +284,7 @@ Running the server as a remote HTTP endpoint for other users has its own configu
 
 Defaults are safe for single-user use. Before exposing the HTTP transport to others, lock down three things:
 
-- **Trust the proxy, not the header.** The server forwards any `Authorization: Bearer` header straight to MediaWiki — authentication is the reverse proxy's job. Terminate TLS there, and don't expose the MCP port directly on an untrusted network. See [docs/deployment.md — security checklist](docs/deployment.md#security-checklist).
+- **Terminate TLS at your reverse proxy.** Don't expose the MCP port directly on an untrusted network. See [docs/deployment.md — security checklist](docs/deployment.md#security-checklist).
 - **Pair `MCP_BIND` with `MCP_ALLOWED_HOSTS` and `MCP_ALLOWED_ORIGINS`.** The HTTP transport binds to `127.0.0.1` by default. When you open it up with `MCP_BIND=0.0.0.0`, set `MCP_ALLOWED_HOSTS` to the hostnames your proxy forwards and `MCP_ALLOWED_ORIGINS` to the browser origins allowed to call the server — these block DNS-rebinding and cross-origin attacks respectively.
 - **Uploads are opt-in.** `upload-file` is disabled until you list allowed directories in `uploadDirs` or `MCP_UPLOAD_DIRS`. See [docs/configuration.md — upload directories](docs/configuration.md#upload-directories).
 - **Internal destinations need `MCP_TRUSTED_HOSTS`.** Outbound fetches are SSRF-guarded: a destination resolving to a private or loopback address (e.g. a Docker-network alias like `mediawiki.svc`) is refused until you list its host in `MCP_TRUSTED_HOSTS`. See [docs/deployment.md — outbound SSRF guard](docs/deployment.md#outbound-ssrf-guard).

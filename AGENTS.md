@@ -6,9 +6,10 @@ Project context for AI coding agents working on this repo. For human users, star
 
 - `src/tools/` — one file per non-extension MCP tool (descriptor + handler + registration).
 - `src/tools/extensions/<id>/` — extension packs: tools gated on a specific MediaWiki extension (SMW / Bucket / Cargo / …), grouped under a per-pack module.
-- `src/runtime/` — context, dispatcher, register, reconcile, logger, constants.
+- `src/runtime/` — context, dispatcher, register, reconcile, logger, constants, request-scoped context, auth-shape classifier.
 - `src/wikis/` — wiki registry, selection, mwn provider, discovery, error sanitiser.
-- `src/transport/` — stdio and streamable HTTP entry points, SSRF/upload guards, request context, low-level HTTP helpers.
+- `src/transport/` — stdio and streamable HTTP entry points, SSRF/upload guards, low-level HTTP helpers.
+- `src/auth/` — OAuth for MediaWiki, in two roles (client to a wiki, and the hosted authorization-server proxy). See [src/auth/README.md](src/auth/README.md).
 - `src/config/` — `config.json` loader and substitution.
 - `src/services/` — section, edit, revision, response services consumed via `ToolContext`.
 - `src/results/` — response shaping (truncation, format, schemas).
@@ -17,19 +18,34 @@ Project context for AI coding agents working on this repo. For human users, star
 - `src/server.ts`, `src/index.ts` — server factory and bootstrap.
 - `tests/` — vitest suites mirroring the source tree; shared helpers in `tests/helpers/`.
 
+## Imports
+
+Relative imports name the `.ts` file they actually resolve to — `import { foo } from './foo.ts'`, not `'./foo.js'`. TypeScript rewrites the extension to `.js` on emit (`rewriteRelativeImportExtensions`), so `dist/` is unchanged. Package specifiers are untouched.
+
+`import/extensions` enforces this, so a stale `.js` specifier fails the pre-commit hook. Its help text says to remove the extension; ignore that and change it to `.ts`, since `NodeNext` will not resolve an extensionless relative path.
+
+The module paths passed to `vi.mock`, `vi.doMock`, `vi.unmock`, `vi.importActual` and `vi.importMock` take the same `.ts` extension, but the lint rule does not reach them and the compiler does not rewrite them — they are function arguments, not imports. Keep each one in step with the static import it doubles by hand.
+
+A path handed to a runtime `createRequire( import.meta.url )` resolves against the **emitted** file, not the source, so it keeps the extension and depth `dist/` needs. Leave those alone.
+
 ## Commands
 
 - `npm run build` — compile TypeScript to `dist/`.
 - `npm test` — run the vitest suite once.
 - `npm run lint` — oxlint.
+- `npm run typecheck` — `tsc --noEmit` over `src` **and** `tests`, via `tsconfig.lint.json`. `npm run build` only typechecks `src`, so this is the check that covers test code.
 - `npm run fmt` / `npm run fmt:check` — oxfmt (write / dry-run).
-- `npm run preflight` — full gate (install, lint, fmt check, validate `server.json`, test, build, bundle). Run before a release.
-- Git hooks: `lefthook` auto-installs on `npm install`. Pre-commit runs `oxfmt` (auto-fix on staged files) + `oxlint`. Pre-push runs `tsgo --noEmit` + the test suite. Bypass with `--no-verify`.
+- `npm run preflight` — full gate (install, lint, typecheck, fmt check, validate `server.json`, test, build, bundle). Run before a release.
+- Git hooks: `lefthook` auto-installs on `npm install`. Pre-commit runs `oxfmt` (auto-fix on staged files) + `oxlint`. Pre-push runs `npm run typecheck` + the test suite. Bypass with `--no-verify`.
 - `npm run inspector` — watch-mode build + MCP Inspector UI for interactive debugging.
 
 ## Tool conventions
 
 See [docs/tool-conventions.md](docs/tool-conventions.md) for tool design stance, description voice, parameter docs, annotation hints, sibling disambiguation, canonical MediaWiki terminology, and result-cap behavior. Consult before adding or modifying a tool.
+
+## Documentation conventions
+
+See [docs/documentation-conventions.md](docs/documentation-conventions.md) for the reader, register, and length rules for prose documentation. Consult before writing or editing `README.md`, `CHANGELOG.md`, or any page under `docs/`.
 
 ## Tool handlers
 
@@ -51,8 +67,8 @@ A pack is a self-describing module exposing tools that share an extension gate. 
 1. Create `src/tools/extensions/<id>/<id>-<verb>.ts` for each tool, following the conventions in `docs/tool-conventions.md`.
 2. Create `src/tools/extensions/<id>/index.ts` exporting the pack:
 	```ts
-	import type { ExtensionPack } from '../types.js';
-	import { myTool } from './<id>-<verb>.js';
+	import type { ExtensionPack } from '../types.ts';
+	import { myTool } from './<id>-<verb>.ts';
 
 	// Convention: export name folds the id — `smwPack`, `bucketPack`, etc.
 	export const myPack: ExtensionPack = {
@@ -69,10 +85,26 @@ Reconcile picks up the new pack automatically — no edits to `src/runtime/recon
 
 A PR that adds, removes, or renames an env var read by the server — or that changes its default or accepted values — must also update:
 
-- **`README.md`** — the environment-variable table.
-- **`server.json`** — the `environmentVariables` array in **both** the `mcpb` and `npm` package blocks.
+- **The right env-var table for the variable's tier.** Each variable lives in exactly one table: **`README.md`** for a core variable that applies to any setup; **`docs/deployment.md`** (the HTTP-transport or hosted-OAuth-proxy sub-table) for a variable that only matters when self-hosting the HTTP server or running the proxy; **`docs/configuration.md`** for a config-file substitution or upload-directory variable.
+- **`server.json`** — the `environmentVariables` array in **both** the `mcpb` and `npm` package blocks, if the variable is one the install-time prompts should surface.
 - **`CHANGELOG.md`** — an entry under `## [Unreleased]` if the change is user-visible.
 - **`Dockerfile`** — only if the var needs a default baked into the docker image.
+
+## Adding a client
+
+A client that just pastes the standard configuration gets a row in the client table under "Standard configuration" in the README, not a `###` section by itself. A client can have both, as Cursor and VS Code do, when it also needs install badges or other prose a row cannot carry. Confirm the configuration file path and root key against the client's own current documentation first: a wrong path costs a user a debugging session.
+
+A client earns its own `###` section when its configuration shape differs from the standard `mcpServers` object, as OpenCode's `mcp` key does, or when it needs install-flow prose a table row cannot carry: plugin install commands, a bundle download, install badges, or more than one configuration file location. Antigravity is an example of the latter: its configuration shape is the standard one, but it needs two file locations plus a note about importing an existing Gemini CLI setup.
+
+Never add another copy of the standard configuration block: the point is not chasing a change through one block per client, though the badge payloads and the two plugin server declarations (`plugins/mediawiki-mcp-server/.mcp.json` and `.codex-plugin/mcp.json`) carry their own copies that must be kept in step.
+
+Retiring or adding a committed install channel needs a `## [Unreleased]` entry in CHANGELOG.md; documenting a client that needs no committed file does not.
+
+See "Distribution" below for the channel map and the manifest contracts.
+
+## Distribution
+
+See [docs/distribution.md](docs/distribution.md) for the install channels, the Claude Code and Codex plugin layout, the manifest fields `scripts/sync-manifests.cjs` owns, and how to test an install before publishing. Consult before adding an install channel or editing a plugin manifest.
 
 ## Testing
 

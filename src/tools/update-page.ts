@@ -1,8 +1,8 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { buildPageUrl, formatEditComment } from '../wikis/utils.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { buildPageUrl, formatEditComment } from '../wikis/utils.ts';
 
 interface ApiEditResponse {
 	result?: string;
@@ -68,22 +68,16 @@ function validateArgs({ section, mode, sectionTitle }: UpdatePageArgs): string |
 	return undefined;
 }
 
-function buildEditParams({
-	title,
-	source,
-	latestId,
-	comment,
-	section,
-	mode,
-	sectionTitle,
-	bot,
-}: UpdatePageArgs): Record<string, string | number | boolean> {
+function buildEditParams(
+	ctx: ToolContext,
+	{ title, source, latestId, comment, section, mode, sectionTitle, bot }: UpdatePageArgs,
+): Record<string, string | number | boolean> {
 	const sourceField =
 		mode === 'append' ? 'appendtext' : mode === 'prepend' ? 'prependtext' : 'text';
 	return {
 		action: 'edit',
 		title,
-		summary: formatEditComment('update-page', comment),
+		summary: formatEditComment(ctx, 'update-page', comment),
 		nocreate: true,
 		[sourceField]: source,
 		...(latestId !== undefined ? { baserevid: latestId } : {}),
@@ -104,7 +98,7 @@ export const updatePage: Tool<typeof inputSchema> = {
 		destructiveHint: true,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'update page',
 	target: (a) => a.title,
 
@@ -117,7 +111,9 @@ export const updatePage: Tool<typeof inputSchema> = {
 		const mwn = await ctx.mwn();
 		const response =
 			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- mwn API response shape; trusted at this boundary
-			(await ctx.edit.submit(mwn, buildEditParams(args))) as { edit?: ApiEditResponse } | undefined;
+			(await ctx.edit.submit(mwn, buildEditParams(ctx, args))) as
+				| { edit?: ApiEditResponse }
+				| undefined;
 		const edit = response?.edit;
 		if (!edit || edit.result !== 'Success') {
 			return ctx.format.error(

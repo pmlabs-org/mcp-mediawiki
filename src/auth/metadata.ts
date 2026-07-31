@@ -1,7 +1,12 @@
 // src/auth/metadata.ts
-import { logger } from '../runtime/logger.js';
+import { logger } from '../runtime/logger.ts';
+import { mwOauth2AuthorizeEndpoint, mwOauth2TokenEndpoint } from './mwOauth2Endpoints.ts';
 
-export interface AsMetadata {
+// The authorization-server metadata of an upstream wiki, as discovered from its
+// .well-known document or synthesized from conventions when discovery fails.
+// Distinct from authorizationServer/asMetadata.ts's AsMetadataDoc, which is the
+// metadata this server serves about ITSELF when acting as the hosted proxy.
+export interface UpstreamAsMetadata {
 	issuer: string;
 	authorization_endpoint: string;
 	token_endpoint: string;
@@ -31,13 +36,13 @@ export interface WikiSlice {
 
 const TIMEOUT_MS = 5000;
 
-const cache = new Map<string, Promise<AsMetadata>>();
+const cache = new Map<string, Promise<UpstreamAsMetadata>>();
 
 export function _resetMetadataCacheForTesting(): void {
 	cache.clear();
 }
 
-export function fetchMetadata(wikiKey: string, wiki: WikiSlice): Promise<AsMetadata> {
+export function fetchMetadata(wikiKey: string, wiki: WikiSlice): Promise<UpstreamAsMetadata> {
 	const cached = cache.get(wikiKey);
 	if (cached) {
 		return cached;
@@ -50,7 +55,7 @@ export function fetchMetadata(wikiKey: string, wiki: WikiSlice): Promise<AsMetad
 	return pending;
 }
 
-async function doFetch(wikiKey: string, wiki: WikiSlice): Promise<AsMetadata> {
+async function doFetch(wikiKey: string, wiki: WikiSlice): Promise<UpstreamAsMetadata> {
 	const started = Date.now();
 	const origin = `${wiki.server}/.well-known/oauth-authorization-server`;
 	const pathed = `${wiki.server}/.well-known/oauth-authorization-server${wiki.scriptpath}/rest.php/oauth2`;
@@ -72,10 +77,10 @@ async function doFetch(wikiKey: string, wiki: WikiSlice): Promise<AsMetadata> {
 	}
 
 	// Both probes failed or returned malformed docs — synthesise from conventions.
-	const synthesized: AsMetadata = {
+	const synthesized: UpstreamAsMetadata = {
 		issuer: wiki.server,
-		authorization_endpoint: `${wiki.server}${wiki.scriptpath}/rest.php/oauth2/authorize`,
-		token_endpoint: `${wiki.server}${wiki.scriptpath}/rest.php/oauth2/access_token`,
+		authorization_endpoint: mwOauth2AuthorizeEndpoint(wiki.server, wiki.scriptpath),
+		token_endpoint: mwOauth2TokenEndpoint(wiki.server, wiki.scriptpath),
 		source: 'synthesized',
 		synthesized: true,
 	};
@@ -114,7 +119,7 @@ async function tryFetch(url: string): Promise<unknown> {
 function parseMetadata(
 	raw: unknown,
 	source: 'well-known' | 'well-known-pathed',
-): AsMetadata | null {
+): UpstreamAsMetadata | null {
 	// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- post-JSON boundary; required fields validated immediately below
 	const obj = raw as Record<string, unknown>;
 	const auth = obj.authorization_endpoint;
@@ -146,7 +151,12 @@ function parseMetadata(
 	};
 }
 
-function finalize(wikiKey: string, started: number, md: AsMetadata, wiki: WikiSlice): AsMetadata {
+function finalize(
+	wikiKey: string,
+	started: number,
+	md: UpstreamAsMetadata,
+	wiki: WikiSlice,
+): UpstreamAsMetadata {
 	const issuer = md.issuer || wiki.server;
 	logger.info('', {
 		event: 'oauth_discovery',

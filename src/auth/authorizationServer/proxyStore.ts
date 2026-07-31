@@ -34,6 +34,27 @@ export interface UpstreamToken {
 	// this upstream token. A presented refresh token whose rid differs is a
 	// superseded/replayed token (OAuth 2.1 §4.3.1 reuse detection).
 	refreshId?: string;
+	// The downstream client this grant was issued to, so the refresh grant can
+	// refuse a token presented by a different one (OAuth 2.1 §4.3). Optional
+	// because records written before this field existed are replayed verbatim
+	// from disk: requiring it would make the type a lie at runtime and sign
+	// those users out on the deploy that added it.
+	clientId?: string;
+}
+
+export interface DurableSnapshot {
+	version: 1;
+	// Insertion order preserved so FIFO eviction survives a restore.
+	clients: ClientRecord[];
+	// [ upstreamTokenId, token ] pairs; the id is not carried on the record.
+	upstream: Array<[string, UpstreamToken]>;
+}
+
+// Live counts of the durable slice, for observability. `upstreamTokens` is the
+// unbounded one (it grows with cumulative sign-ins); `clients` is FIFO-capped.
+export interface ProxyStoreStats {
+	upstreamTokens: number;
+	clients: number;
 }
 
 const TXN_TTL_MS = 15 * 60 * 1000;
@@ -59,6 +80,7 @@ export interface ProxyStore {
 	deleteUpstreamToken(id: string): void;
 	beginRefreshRotation(id: string, expectedRefreshId: string): boolean;
 	finishRefreshRotation(id: string, newRefreshId?: string): void;
+	stats(): ProxyStoreStats;
 }
 
 interface Expiring<T> {
@@ -98,6 +120,10 @@ export class InMemoryProxyStore implements ProxyStore {
 
 	public getClient(id: string): ClientRecord | undefined {
 		return this.clients.get(id);
+	}
+
+	public stats(): ProxyStoreStats {
+		return { upstreamTokens: this.upstream.size, clients: this.clients.size };
 	}
 
 	public putTransaction(id: string, t: TransactionRecord, ttlMs = TXN_TTL_MS): void {
@@ -190,5 +216,28 @@ export class InMemoryProxyStore implements ProxyStore {
 		if (newRefreshId !== undefined) {
 			this.setRefreshId(id, newRefreshId);
 		}
+	}
+
+	public snapshotDurable(): DurableSnapshot {
+		return {
+			version: 1,
+			clients: [...this.clients.values()],
+			upstream: [...this.upstream.entries()],
+		};
+	}
+
+	public restoreDurable(snapshot: DurableSnapshot): void {
+		if (snapshot.version !== 1) {
+			throw new Error(`unsupported proxy store snapshot version ${String(snapshot.version)}`);
+		}
+		this.clients.clear();
+		for (const c of snapshot.clients) {
+			this.clients.set(c.clientId, c);
+		}
+		this.upstream.clear();
+		for (const [id, t] of snapshot.upstream) {
+			this.upstream.set(id, t);
+		}
+		// transactions, codes, and the refreshing set are ephemeral: left empty on purpose.
 	}
 }

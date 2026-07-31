@@ -11,33 +11,42 @@ Every stderr line is a JSON object. Each line has `ts` (ISO-8601 UTC) and `level
 Every tool invocation emits one line:
 
 ```json
-{"ts":"...","level":"info","event":"tool_call","tool":"get-page","wiki":"example.org","target":"Main Page","outcome":"success","duration_ms":142,"caller":"sha256:7f2a4c1d9e0b","session_id":"f4e1d2c3b4a5","upstream_status":200,"truncated":false}
+{"ts":"...","level":"info","event":"tool_call","tool":"get-page","wiki":"example.org","target":"Main Page","outcome":"success","duration_ms":142,"caller":"sha256:7f2a4c1d9e0b","upstream_status":200,"truncated":false}
 ```
 
 Fields you'll filter on:
 
-- **`outcome`** — `success` or one of seven error categories: `not_found`, `permission_denied`, `invalid_input`, `conflict`, `authentication`, `rate_limited`, `upstream_failure`.
-- **`level`** — `info` for `success`, `error` for `upstream_failure`, `warning` for everything else. A `level=error` alert catches server-side failures without firing on client mistakes like a typo'd page title.
+- **`outcome`** — `success`, `cancelled` (the caller cancelled the call or disconnected before it finished), or one of seven error categories: `not_found`, `permission_denied`, `invalid_input`, `conflict`, `authentication`, `rate_limited`, `upstream_failure`.
+- **`level`** — `info` for `success` and `cancelled`, `error` for `upstream_failure`, `warning` for everything else. A `level=error` alert catches server-side failures without firing on client mistakes like a typo'd page title.
 - **`caller`** — `sha256:` plus the first 12 hex chars of SHA-256 of the bearer token, or the literal string `anonymous`. Stable per token within a process; never the raw token.
-- **`session_id`** — first 12 hex chars of the MCP session UUID. Omitted on stdio, which has no session concept.
 - **`target`** — a single identifier extracted from the tool's input (typically a page title, search query, or URL). Omitted for tools without one: `get-pages`, `compare-pages`, `parse-wikitext`, `get-recent-changes`.
 
-`tool_call` lines go to stderr only; they are never forwarded to the connected MCP client.
+All log output goes to stderr only; nothing is forwarded to the connected MCP client.
 
 ### Startup banner
 
 One line on server boot — a snapshot of the effective configuration that's safe to paste into a support ticket:
 
 ```json
-{"ts":"...","level":"info","event":"startup","version":"0.8.0","transport":"http","host":"0.0.0.0","port":8080,"auth_shape":"bearer-passthrough","default_wiki":"example.org","wikis":["example.org"],"allow_wiki_management":false,"allowed_hosts":["wiki.example.org"],"allowed_origins":["https://wiki.example.org"],"max_request_body":"1mb","upload_dirs_configured":false}
+{"ts":"...","level":"info","event":"startup","version":"0.8.0","transport":"http","host":"0.0.0.0","port":8080,"auth_shape":"anonymous","default_wiki":"example.org","wikis":["example.org"],"allow_wiki_management":false,"allowed_hosts":["wiki.example.org"],"allowed_origins":["https://wiki.example.org"],"max_request_body":"1mb","upload_dirs_configured":false}
 ```
 
-- **`auth_shape`** — `anonymous`, `static-credential`, or `bearer-passthrough`.
-- **`host`, `port`, `allowed_hosts`, `allowed_origins`** — HTTP transport only. The two allowlists are also omitted when not configured.
+- **`auth_shape`** — `anonymous`, `static-credential`, `oauth-proxy` (hosted sign-in configured), or `bearer-passthrough` (only while the deprecated `MCP_ALLOW_BEARER_PASSTHROUGH` is set).
+- **`host`, `port`, `allowed_hosts`, `allowed_origins`** — HTTP transport only. `allowed_hosts` is omitted when not configured. `allowed_origins` is always present: an empty array means every browser request is refused, not that the check is off.
 - **`upload_dirs_configured`** — `true` when `uploadDirs` (config) or `MCP_UPLOAD_DIRS` (env) is set. The actual paths are not logged.
 - **`max_request_body`** — HTTP transport only. The resolved `MCP_MAX_REQUEST_BODY` value.
 
 Tokens, usernames, and passwords never appear.
+
+### Stray output
+
+Log output from the MediaWiki client library, relocated here so it cannot corrupt the protocol stream. Expect it on a bot-password login, an API warning, or a request retry:
+
+```json
+{"ts":"...","level":"warning","event":"stray_stdout","text":"[2026-07-23 16:48:43] [W] Warning received from API: main: ..."}
+```
+
+`text` is one line of library output, passed through unaltered, so it is neither JSON nor redacted — a login line carries the configured username.
 
 ### Health vs readiness
 
@@ -68,9 +77,9 @@ Sample scrape:
 mcp_tool_calls_total{tool="get-page",wiki="example.org",outcome="success"} 142
 mcp_tool_calls_total{tool="get-page",wiki="example.org",outcome="not_found"} 4
 
-# HELP mcp_active_sessions Number of active StreamableHTTP MCP sessions.
-# TYPE mcp_active_sessions gauge
-mcp_active_sessions 3
+# HELP mcp_inflight_requests Number of /mcp requests currently being served (subscription streams excluded).
+# TYPE mcp_inflight_requests gauge
+mcp_inflight_requests 3
 ```
 
 Exposed series:
@@ -78,8 +87,14 @@ Exposed series:
 - `mcp_tool_calls_total{tool,wiki,outcome}` — counter of tool invocations.
 - `mcp_tool_call_duration_seconds{tool,wiki}` — histogram of tool-call durations.
 - `mcp_upstream_status_total{tool,wiki,status}` — counter of upstream MediaWiki HTTP status codes.
-- `mcp_active_sessions` — gauge of active StreamableHTTP MCP sessions.
+- `mcp_inflight_requests` — gauge of `/mcp` requests currently being served. Subscription streams are excluded: they are held open by design.
+- `mcp_subscription_streams` — gauge of open change-notification streams (`subscriptions/listen`), the closest measure of connected clients.
 - `mcp_ready_failures_total` — counter of `/ready` probes that returned non-200.
+- `mcp_rate_limited_total{caller}` — counter of `tools/call` requests refused with `429`; the `caller` label is `caller` for authenticated callers and `anonymous` for the shared bucket. A rising `caller` series means authenticated callers hit `MCP_RATE_LIMIT`; a rising `anonymous` series means the shared backstop is engaging.
+- `mcp_proxy_store_upstream_tokens` — gauge of upstream MediaWiki tokens held in the hosted OAuth proxy store. This set grows with cumulative sign-ins over the process lifetime; watch it to size memory and the flush cost below.
+- `mcp_proxy_store_clients` — gauge of registered clients held in the hosted OAuth proxy store. FIFO-capped at 10,000, so this plateaus rather than growing without bound.
+- `mcp_proxy_store_flush_duration_seconds` — histogram of hosted-proxy store durable-flush durations (serialize + encrypt + write). Every upstream-token write flushes the whole store synchronously, so this scales with the token count above. Records successful flushes only.
+- `mcp_proxy_store_flush_failures_total` — counter of durable flushes that failed to write (a disk error). A failure means the most recent sign-in change is held in memory only and would be lost on restart; alert on any increase.
 
 The endpoint is **unauthenticated**. Restrict reverse-proxy access to your scrape network only — most Kubernetes-style deployments expose `/metrics` on a separate port or path that isn't routable from the public ingress.
 
@@ -98,11 +113,11 @@ docker logs -f mediawiki-mcp-server | humanlog
 
 The server registers `SIGTERM` and `SIGINT` handlers in both the HTTP and stdio transports. On signal:
 
-1. The HTTP listener stops accepting new connections (`server.close()`), and active StreamableHTTP sessions are closed. `/health` and `/ready` keep responding until the listener finishes closing.
-2. In-flight `/mcp` requests are given up to `MCP_SHUTDOWN_GRACE_MS` (default `10000`) to finish. The value is capped at `600000` (10 min); invalid values fall back to the default with a warning.
+1. The HTTP listener stops accepting new connections (`server.close()`). `/health` and `/ready` keep responding until the listener finishes closing.
+2. In-flight `/mcp` requests are given up to `MCP_SHUTDOWN_GRACE_MS` (default `10000`) to finish, after which open change-notification streams are closed gracefully. The value is capped at `600000` (10 min); invalid values fall back to the default with a warning.
 3. The server emits two structured stderr events:
-   - `event: "shutdown"` with `signal`, `transport`, `grace_ms`, `in_flight_at_signal`, `sessions_at_signal`.
-   - `event: "shutdown_complete"` with `in_flight_drained`, `sessions_closed`, `grace_exceeded`, `duration_ms`.
+   - `event: "shutdown"` with `signal`, `transport`, `grace_ms`, `in_flight_at_signal`.
+   - `event: "shutdown_complete"` with `in_flight_drained`, `grace_exceeded`, `duration_ms`.
 4. The process exits with code `0` if the drain finished within grace, `1` if `grace_exceeded` is true.
 
 A second `SIGTERM` or `SIGINT` during drain forces an immediate exit with code `1`, so an operator can escape a hung shutdown with a second Ctrl-C or follow-up signal.

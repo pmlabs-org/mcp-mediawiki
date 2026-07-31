@@ -1,5 +1,5 @@
 # ----- Build Stage -----
-FROM node:lts-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a AS builder
+FROM node:lts-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd AS builder
 WORKDIR /app
 
 # Copy package and configuration
@@ -12,7 +12,7 @@ COPY src ./src
 RUN npm ci --ignore-scripts && npm run build
 
 # ----- Production Stage -----
-FROM node:lts-alpine@sha256:21f403ab171f2dc89bad4dd69d7721bfd15f084ccb46cdd225f31f2bc59b5c9a
+FROM node:lts-alpine@sha256:a0b9bf06e4e6193cf7a0f58816cc935ff8c2a908f81e6f1a95432d679c54fbfd
 
 ARG GIT_SHA=unknown
 LABEL org.opencontainers.image.title="MediaWiki MCP Server" \
@@ -41,6 +41,9 @@ RUN npm ci --omit=dev --ignore-scripts
 RUN addgroup -S nodejs \
 	&& adduser -S -G nodejs nodejs \
 	&& chown -R nodejs:nodejs /app
+
+RUN mkdir -p /app/data && chown nodejs:nodejs /app/data
+VOLUME /app/data
 USER nodejs
 
 ENV NODE_ENV=production
@@ -49,6 +52,10 @@ ENV NODE_ENV=production
 ENV PORT=8080
 ENV MCP_TRANSPORT=http
 ENV MCP_BIND=0.0.0.0
+
+# Persist the hosted OAuth proxy store on a volume so restarts/deploys do not sign
+# every user out. Mount a named volume or host path at /app/data in production.
+ENV MCP_OAUTH_PROXY_STORE_FILE=/app/data/proxy-store.enc
 
 # Expose HTTP port
 EXPOSE 8080

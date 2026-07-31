@@ -1,8 +1,9 @@
 import { describe, it, expect } from 'vitest';
-import { createToolContext } from '../../src/runtime/createContext.js';
-import { createAppState } from '../../src/wikis/state.js';
-import { logger } from '../../src/runtime/logger.js';
-import type { Config } from '../../src/config/loadConfig.js';
+import { createToolContext } from '../../src/runtime/createContext.ts';
+import { createAppState, type AppState } from '../../src/wikis/state.ts';
+import { logger } from '../../src/runtime/logger.ts';
+import { withRequestFields } from '../../src/runtime/requestContext.ts';
+import type { Config } from '../../src/config/loadConfig.ts';
 
 const testConfig: Config = {
 	defaultWiki: 'w',
@@ -39,5 +40,45 @@ describe('createToolContext', () => {
 		expect(ctx.errors).toBeDefined();
 		expect(ctx.logger).toBe(logger);
 		expect(ctx.transport).toBe('stdio');
+	});
+
+	it('applies the request cancellation signal to the mwn instance it hands out', async () => {
+		const calls: { signal?: AbortSignal }[] = [];
+		const bot = {
+			async rawRequest(options: { signal?: AbortSignal }): Promise<unknown> {
+				calls.push(options);
+				return {};
+			},
+		};
+		const state = {
+			...createAppState(testConfig),
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- stub covering only the surface under test
+			mwnProvider: { get: async (): Promise<unknown> => bot } as unknown as AppState['mwnProvider'],
+		};
+		const ctx = createToolContext({ logger, state, transport: 'stdio' });
+		const controller = new AbortController();
+
+		await withRequestFields({ signal: controller.signal }, async () => {
+			const scoped = await ctx.mwn();
+			await scoped.rawRequest({ url: 'https://test.wiki/w/api.php' });
+		});
+
+		expect(calls[0]?.signal).toBe(controller.signal);
+	});
+
+	it('hands out the bare instance when no request scope is active', async () => {
+		const bot = {
+			async rawRequest(): Promise<unknown> {
+				return {};
+			},
+		};
+		const state = {
+			...createAppState(testConfig),
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- stub covering only the surface under test
+			mwnProvider: { get: async (): Promise<unknown> => bot } as unknown as AppState['mwnProvider'],
+		};
+		const ctx = createToolContext({ logger, state, transport: 'stdio' });
+
+		expect(await ctx.mwn()).toBe(bot);
 	});
 });

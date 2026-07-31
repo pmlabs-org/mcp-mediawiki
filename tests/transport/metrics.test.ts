@@ -2,60 +2,19 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 
 const mockRequest = vi.fn();
 
-// Two mock layers are needed and they serve different purposes:
-//
-// 1. The vi.mock() calls below intercept module imports so that the top-level
-//    bootstrap in streamableHttp.ts (loadConfigFromFile, evaluateBearerGuard,
-//    emitStartupBanner, app.listen) can run on import without needing a real
-//    config.json or a reachable wiki. These keep the *module's own* state
-//    benign so importing it doesn't crash.
-//
-// 2. The mockActiveWiki and mockMwnProvider objects below are passed
-//    explicitly to mountReadyEndpoint() in each test's makeApp(). The tests
-//    create their own express app independent of the module-level one, so
-//    these inline mocks are what actually drive the test logic. Do not
-//    collapse the two layers — they target different code paths.
-
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'example.org',
-			wikis: {
-				'example.org': {
-					sitename: 'Example',
-					server: 'https://example.org',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = async () => ({ request: mockRequest });
-		invalidate = () => {};
-	},
-}));
+// mockActiveWiki and mockMwnProvider are passed explicitly to mountReadyEndpoint()
+// in each test's makeApp(): the tests build their own express app and these inline
+// stubs drive the probe. streamableHttp.ts no longer runs any boot on import, so no
+// module-level loadConfig/mwnProvider mock is needed.
 
 import express from 'express';
 import request from 'supertest';
-import {
-	mountMetricsEndpoint,
-	mountReadyEndpoint,
-	__resetReadyCacheForTesting,
-} from '../../src/transport/streamableHttp.js';
-import { __resetMetricsForTesting, setSessionsProvider } from '../../src/runtime/metrics.js';
-import type { ActiveWiki } from '../../src/wikis/activeWiki.js';
-import type { MwnProvider } from '../../src/wikis/mwnProvider.js';
-import type { WikiConfig } from '../../src/config/loadConfig.js';
+import { mountMetricsEndpoint } from '../../src/transport/streamableHttp.ts';
+import { mountReadyEndpoint, __resetReadyCacheForTesting } from '../../src/transport/ready.ts';
+import { __resetMetricsForTesting, setInFlightProvider } from '../../src/runtime/metrics.ts';
+import type { ActiveWiki } from '../../src/wikis/activeWiki.ts';
+import type { MwnProvider } from '../../src/wikis/mwnProvider.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
 
 const exampleWikiConfig: WikiConfig = {
 	sitename: 'Example',
@@ -115,7 +74,8 @@ describe('GET /metrics — enabled', () => {
 		expect(res.headers['content-type']).toContain('text/plain');
 		expect(res.text).toContain('# HELP mcp_tool_calls_total');
 		expect(res.text).toContain('# HELP mcp_tool_call_duration_seconds');
-		expect(res.text).toContain('# HELP mcp_active_sessions');
+		expect(res.text).toContain('# HELP mcp_inflight_requests');
+		expect(res.text).toContain('# HELP mcp_subscription_streams');
 		expect(res.text).toContain('# HELP mcp_ready_failures_total');
 	});
 
@@ -124,6 +84,30 @@ describe('GET /metrics — enabled', () => {
 		const app = makeApp();
 		const ready = await request(app).get('/ready');
 		expect(ready.status).toBe(503);
+		const metrics = await request(app).get('/metrics');
+		expect(metrics.text).toMatch(/mcp_ready_failures_total 1/);
+	});
+
+	it('mcp_ready_failures_total counts one failure for concurrent probes', async () => {
+		// One outage, three simultaneous readiness probes: they share a single
+		// probe, so only the request that started it records the failure. The
+		// failure has to be slower than the requests take to arrive, or the first
+		// probe finishes and fills the cache before the others reach the handler.
+		mockRequest.mockImplementation(
+			() =>
+				new Promise((_resolve, reject) => {
+					setTimeout(() => reject(new Error('upstream down')), 50);
+				}),
+		);
+		const app = makeApp();
+		const responses = await Promise.all([
+			request(app).get('/ready'),
+			request(app).get('/ready'),
+			request(app).get('/ready'),
+		]);
+		for (const res of responses) {
+			expect(res.status).toBe(503);
+		}
 		const metrics = await request(app).get('/metrics');
 		expect(metrics.text).toMatch(/mcp_ready_failures_total 1/);
 	});
@@ -142,10 +126,10 @@ describe('GET /metrics — enabled', () => {
 		expect(metrics.text).toMatch(/mcp_ready_failures_total 1/);
 	});
 
-	it('mcp_active_sessions reads the configured provider', async () => {
+	it('mcp_inflight_requests reads the configured provider', async () => {
 		const app = makeApp();
-		setSessionsProvider(() => 4);
+		setInFlightProvider(() => 4);
 		const res = await request(app).get('/metrics');
-		expect(res.text).toMatch(/mcp_active_sessions 4/);
+		expect(res.text).toMatch(/mcp_inflight_requests 4/);
 	});
 });

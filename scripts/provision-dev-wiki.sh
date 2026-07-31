@@ -1,0 +1,245 @@
+#!/usr/bin/env bash
+#
+# provision-dev-wiki.sh — register an OAuth 2.0 consumer (and optional bot
+# password) on a MediaWiki container running Extension:OAuth, for local
+# end-to-end testing of the hosted OAuth proxy.
+#
+# The environment — a running MediaWiki container with Extension:OAuth and
+# OAuth2 enabled — is the caller's responsibility. This script only provisions
+# credentials against a container that already exists.
+#
+# Usage:  scripts/provision-dev-wiki.sh <container> [options]
+#
+# Credential lines print to STDOUT in env-file format; capture them with:
+#   set -a; eval "$( scripts/provision-dev-wiki.sh <container> )"; set +a
+# All human-readable progress goes to STDERR, keeping STDOUT clean.
+
+set -euo pipefail
+
+# --- defaults ---------------------------------------------------------------
+PUBLIC_URL='http://localhost:3000/mcp'
+WIKI_URL='http://localhost:8080'
+MW_PATH='/var/www/html'
+ADMIN_USER='Admin'
+GRANTS='basic,highvolume,editpage,editprotected,createeditmovepage,delete,uploadfile,uploadeditmovefile'
+WITH_BOT=1
+DRY_RUN=0
+CONTAINER=''
+
+log() { printf '%s\n' "$*" >&2; }
+die() { printf 'error: %s\n' "$*" >&2; exit 1; }
+
+usage() {
+	cat <<'EOF'
+provision-dev-wiki.sh — register an OAuth 2.0 consumer (+ optional bot password)
+on a MediaWiki container running Extension:OAuth, for local OAuth-proxy testing.
+
+Usage: scripts/provision-dev-wiki.sh <container> [options]
+
+  <container>          Docker container name or id running MediaWiki (required).
+
+Options:
+  --public-url <url>   Proxy public base (MCP_PUBLIC_URL). Default: http://localhost:3000/mcp
+                       Consumer callback is derived as <public-url>/oauth/callback.
+  --wiki-url <url>     Browser/API base of the wiki. Default: http://localhost:8080
+  --mw-path <path>     MediaWiki install path inside the container. Default: /var/www/html
+  --admin-user <name>  Wiki account that owns the consumer/bot password. Default: Admin
+  --grants <csv>       Comma-separated grant ids. Default covers every write tool.
+  --no-bot             Skip bot-password creation.
+  --dry-run            Print the docker commands that would run, then exit.
+  -h, --help           Show this help.
+
+Output (stdout, env-file format): OAUTH2_CLIENT_ID, MCP_OAUTH2_CLIENT_SECRET,
+MW_DEV_BOT_USER, MW_DEV_BOT_PASSWORD, and (for loopback wikis) MCP_TRUSTED_HOSTS.
+EOF
+}
+
+# --- parse args -------------------------------------------------------------
+while [ $# -gt 0 ]; do
+	case "$1" in
+		--public-url) PUBLIC_URL="${2:?--public-url needs a value}"; shift 2 ;;
+		--wiki-url)   WIKI_URL="${2:?--wiki-url needs a value}"; shift 2 ;;
+		--mw-path)    MW_PATH="${2:?--mw-path needs a value}"; shift 2 ;;
+		--admin-user) ADMIN_USER="${2:?--admin-user needs a value}"; shift 2 ;;
+		--grants)     GRANTS="${2:?--grants needs a value}"; shift 2 ;;
+		--no-bot)     WITH_BOT=0; shift ;;
+		--bot)        WITH_BOT=1; shift ;;
+		--dry-run)    DRY_RUN=1; shift ;;
+		-h|--help)    usage; exit 0 ;;
+		-*)           usage >&2; die "unknown option: $1" ;;
+		*)            if [ -z "$CONTAINER" ]; then CONTAINER="$1"; else die "unexpected argument: $1"; fi; shift ;;
+	esac
+done
+
+[ -n "$CONTAINER" ] || { usage >&2; die "missing <container> argument"; }
+
+CALLBACK_URL="${PUBLIC_URL%/}/oauth/callback"
+CONSUMER_NAME="MCP dev proxy (${PUBLIC_URL})"
+RUN_PHP="${MW_PATH%/}/maintenance/run.php"
+OAUTH_SCRIPT="${MW_PATH%/}/extensions/OAuth/maintenance/createOAuthConsumer.php"
+
+# --- assemble commands as arrays (safe quoting for both run and print) ------
+consumer_argv=(docker exec "$CONTAINER" php "$RUN_PHP" "$OAUTH_SCRIPT"
+	--user "$ADMIN_USER" --name "$CONSUMER_NAME"
+	--description 'MediaWiki MCP Server dev proxy' --version '1.0'
+	--oauthVersion 2
+	--oauth2GrantTypes authorization_code --oauth2GrantTypes refresh_token
+	--callbackUrl "$CALLBACK_URL" --approve --jsonOnSuccess)
+IFS=',' read -ra grant_arr <<< "$GRANTS"
+for g in "${grant_arr[@]}"; do consumer_argv+=(--grants "$g"); done
+
+botpw_argv=(docker exec "$CONTAINER" php "$RUN_PHP" createBotPassword
+	--appid mcp-dev --grants "$GRANTS" "$ADMIN_USER")
+
+# --- dry-run: print the commands and exit (no Docker contact) ---------------
+if [ "$DRY_RUN" -eq 1 ]; then
+	printf '%q ' "${consumer_argv[@]}"; printf '\n'
+	if [ "$WITH_BOT" -eq 1 ]; then printf '%q ' "${botpw_argv[@]}"; printf '\n'; fi
+	exit 0
+fi
+
+# --- preflight --------------------------------------------------------------
+command -v docker >/dev/null 2>&1 || die "docker not found on PATH"
+running="$(docker inspect -f '{{.State.Running}}' "$CONTAINER" 2>/dev/null || true)"
+[ "$running" = "true" ] || die "container '$CONTAINER' is not running"
+docker exec "$CONTAINER" test -f "$RUN_PHP" \
+	|| die "MediaWiki not found at $MW_PATH in '$CONTAINER' (set --mw-path)"
+docker exec "$CONTAINER" test -f "$OAUTH_SCRIPT" \
+	|| die "Extension:OAuth not found at $MW_PATH/extensions/OAuth (install it and enable OAuth2)"
+
+# Extension:OAuth being installed does not make the wiki able to issue OAuth2
+# tokens. Registration needs rights that Extension:OAuth grants to nobody by
+# default, and the token endpoint needs a signing keypair. Missing either, a
+# consumer registered here — or in the browser — is useless, so check before
+# provisioning rather than handing back credentials that cannot work.
+readiness_php='$u=User::newFromName("'"$ADMIN_USER"'");'
+readiness_php+='$p=MediaWiki\MediaWikiServices::getInstance()->getPermissionManager();'
+readiness_php+='echo "KEYS=".(((string)($GLOBALS["wgOAuth2PrivateKey"]??"")!==""'
+readiness_php+='&&(string)($GLOBALS["wgOAuth2PublicKey"]??"")!=="")?"yes":"no")'
+readiness_php+='." EMAIL=".($u->getEmail()!==""?"yes":"no")'
+readiness_php+='." PROPOSE=".($p->userHasRight($u,"mwoauthproposeconsumer")?"yes":"no")'
+readiness_php+='." APPROVE=".($p->userHasRight($u,"mwoauthmanageconsumer")?"yes":"no")."\n";'
+readiness="$(printf '%s' "$readiness_php" \
+	| docker exec -i "$CONTAINER" php "$RUN_PHP" eval 2>/dev/null | tr -d '\r')"
+
+case "$readiness" in
+	*KEYS=*)
+		missing=''
+		case "$readiness" in *KEYS=no*) missing="${missing}keys " ;; esac
+		case "$readiness" in *EMAIL=no*) missing="${missing}email " ;; esac
+		case "$readiness" in *PROPOSE=no*) missing="${missing}propose " ;; esac
+		case "$readiness" in *APPROVE=no*) missing="${missing}approve " ;; esac
+		if [ -n "$missing" ]; then
+			log "This wiki cannot issue OAuth2 tokens yet. Fix the items below, then re-run."
+			log ""
+			case "$missing" in *keys*)
+				log "  OAuth2 signing keys are not configured. Generate a keypair:"
+				log "    openssl genrsa -out oauth2.key 2048"
+				log "    openssl rsa -in oauth2.key -pubout -out oauth2.pub"
+				log "  and set \$wgOAuth2PrivateKey / \$wgOAuth2PublicKey in LocalSettings.php"
+				log "  to the key text (or to paths the web server user can read)."
+				log "" ;;
+			esac
+			case "$missing" in *propose*|*approve*)
+				log "  ${ADMIN_USER} may not register consumers. Extension:OAuth grants these"
+				log "  to no group by default, so add to LocalSettings.php:"
+				log "    \$wgGroupPermissions['sysop']['mwoauthproposeconsumer'] = true;"
+				log "    \$wgGroupPermissions['sysop']['mwoauthmanageconsumer'] = true;"
+				log "" ;;
+			esac
+			case "$missing" in *email*)
+				log "  ${ADMIN_USER} has no email address, which consumer registration requires."
+				log "  Set one at Special:Preferences (or Special:ChangeEmail) on the wiki."
+				log "" ;;
+			esac
+			die "wiki not ready for OAuth2 (missing: ${missing% })"
+		fi
+		;;
+	*)
+		log "warning: could not determine whether this wiki can issue OAuth2 tokens."
+		log "Continuing; if sign-in later fails, check the OAuth2 signing keys and the"
+		log "mwoauthproposeconsumer right for ${ADMIN_USER}."
+		;;
+esac
+
+# --- register consumer (only if the stock CLI supports OAuth2) ---------------
+# The OAuth2 flags exist only in newer Extension:OAuth. The copy bundled with the
+# MediaWiki 1.43 LTS ships an OAuth1-only createOAuthConsumer.php, so the consumer
+# has to be registered in the browser there.
+#
+# Probe on oauth2IsNotConfidential: it appears only in the newer script. Do not
+# probe 'oauthVersion' or 'oauth2GrantTypes' — the OAuth1-only file contains both
+# as hardcoded array values, so matching those sends a 1.43 wiki down the CLI
+# path, where registration then fails on the unrecognised flags.
+client_id=''
+client_secret=''
+if docker exec "$CONTAINER" grep -q 'oauth2IsNotConfidential' "$OAUTH_SCRIPT" 2>/dev/null; then
+	log "Registering OAuth 2.0 consumer '${CONSUMER_NAME}'"
+	log "  callback: ${CALLBACK_URL}"
+	consumer_json="$("${consumer_argv[@]}")" || die "consumer registration failed (see above)"
+	client_id="$(printf '%s' "$consumer_json" | sed -n 's/.*"key":"\([^"]*\)".*/\1/p')"
+	[ -n "$client_id" ] || die "could not parse consumer key from output: $consumer_json"
+	# A confidential consumer prints its secret once, here. Without it the proxy
+	# refuses to start, so an unparsed secret is a hard failure rather than a
+	# missing convenience.
+	client_secret="$(printf '%s' "$consumer_json" | sed -n 's/.*"secret":"\([^"]*\)".*/\1/p')"
+	[ -n "$client_secret" ] || die "could not parse consumer secret from output: $consumer_json"
+else
+	log "This wiki's Extension:OAuth createOAuthConsumer.php is OAuth1-only, so the"
+	log "consumer can't be registered from the command line here. Register it once"
+	log "in the browser instead:"
+	log "  1. On the wiki, open Special:OAuthConsumerRegistration/propose/oauth2"
+	log "  2. Callback URL (exact): ${CALLBACK_URL}"
+	log "  3. TICK 'Client is confidential' — the proxy authenticates with a client"
+	log "     secret to refresh tokens, and a public consumer has no secret."
+	log "  4. Under 'Allowed OAuth2 grant types', keep Authorization code and"
+	log "     Refresh token ticked."
+	log "  5. Request the grants your tools need (default set: ${GRANTS})."
+	log "  6. Copy the client application key into OAUTH2_CLIENT_ID and the client"
+	log "     secret into MCP_OAUTH2_CLIENT_SECRET; the secret is shown only once."
+	log "See docs/deployment.md for the field-by-field walkthrough."
+fi
+
+# --- optional bot password --------------------------------------------------
+bot_user=''; bot_pw=''
+if [ "$WITH_BOT" -eq 1 ]; then
+	log "Creating bot password (appid mcp-dev) for ${ADMIN_USER}"
+	bot_out="$("${botpw_argv[@]}")" || die "bot password creation failed (see above)"
+	bot_pw="$(printf '%s' "$bot_out" | sed -n "s/.*password:'\([^']*\)'.*/\1/p")"
+	bot_user="$(printf '%s' "$bot_out" | sed -n "s/.*username:'\([^']*\)'.*/\1/p")"
+	[ -n "$bot_pw" ] || die "could not parse bot password from output: $bot_out"
+	[ -n "$bot_user" ] || die "could not parse bot username from output: $bot_out"
+fi
+
+# --- emit credentials (stdout) ----------------------------------------------
+# %q-quote every value so `set -a; eval "$( ... )"; set +a` is safe even when a
+# value contains shell metacharacters — MediaWiki usernames may contain spaces,
+# so `MW_DEV_BOT_USER=First Last@mcp-dev` must be quoted.
+if [ -n "$client_id" ]; then
+	printf 'OAUTH2_CLIENT_ID=%q\n' "$client_id"
+	printf 'MCP_OAUTH2_CLIENT_SECRET=%q\n' "$client_secret"
+fi
+if [ "$WITH_BOT" -eq 1 ]; then
+	printf 'MW_DEV_BOT_USER=%q\n' "$bot_user"
+	printf 'MW_DEV_BOT_PASSWORD=%q\n' "$bot_pw"
+fi
+
+wiki_host="${WIKI_URL#*://}"; wiki_host="${wiki_host%%/*}"   # host[:port] or [ipv6]:port
+if [ "${wiki_host#\[}" != "$wiki_host" ]; then
+	host_only="${wiki_host#\[}"; host_only="${host_only%%\]*}"   # bare host inside [ ]
+else
+	host_only="${wiki_host%%:*}"
+fi
+case "$host_only" in
+	localhost | *.localhost | 127.* | ::1 | 0.0.0.0)
+		printf 'MCP_TRUSTED_HOSTS=%q\n' "$wiki_host" ;;
+	*)
+		log "note: if ${host_only} resolves to a private/internal address, also set MCP_TRUSTED_HOSTS=${wiki_host}" ;;
+esac
+
+if [ -n "$client_id" ]; then
+	log "Done. Set oauth2ClientId to \$OAUTH2_CLIENT_ID and start the proxy (see docs/testing.md)."
+else
+	log "Done. After registering the consumer in the browser (steps above), set"
+	log "OAUTH2_CLIENT_ID to its client key and start the proxy (see docs/testing.md)."
+fi

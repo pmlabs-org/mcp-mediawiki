@@ -1,10 +1,10 @@
 import { describe, it, expect } from 'vitest';
-import { handleRegister } from '../../../src/auth/authorizationServer/register.js';
-import { InMemoryProxyStore } from '../../../src/auth/authorizationServer/proxyStore.js';
+import { handleRegister } from '../../../src/auth/authorizationServer/register.ts';
+import { InMemoryProxyStore } from '../../../src/auth/authorizationServer/proxyStore.ts';
 import {
 	buildRedirectPolicy,
 	parseRedirectAllowlist,
-} from '../../../src/auth/authorizationServer/redirectPolicy.js';
+} from '../../../src/auth/authorizationServer/redirectPolicy.ts';
 
 // The predicate a deployment actually runs with NO operator config: the source-1
 // built-ins (loopback + claude.ai) PLUS the shipped client defaults. This is the
@@ -115,6 +115,37 @@ describe('handleRegister with an operator allowlist', () => {
 		const { res } = run({ client_name: 'Evil', redirect_uris: ['https://evil.example/cb'] });
 		expect(res.status).toBe(400);
 		expect(res.body.error).toBe('invalid_redirect_uri');
+	});
+
+	it('VS Code is accepted under the real default policy (no operator config)', () => {
+		// The real 4-URI payload (stable + Insiders web redirects, plus two loopback
+		// callbacks) registers with no MCP_OAUTH_ALLOWED_REDIRECTS.
+		expect(run(vscode).res.status).toBe(201);
+	});
+
+	it('Cursor is accepted under the real default policy (no operator config)', () => {
+		// The real 3-URI payload (hosted callback, cursor:// desktop callback, and a
+		// loopback fallback) registers with no MCP_OAUTH_ALLOWED_REDIRECTS.
+		expect(run(cursor).res.status).toBe(201);
+	});
+
+	it('ChatGPT is accepted under the real default policy (no operator config)', () => {
+		// The real per-connector payload registers with no MCP_OAUTH_ALLOWED_REDIRECTS.
+		expect(run(chatgpt).res.status).toBe(201);
+		// The per-connector prefix absorbs connector-id churn.
+		expect(
+			run({
+				client_name: 'ChatGPT',
+				redirect_uris: ['https://chatgpt.com/connector/oauth/xyz789'],
+			}).res.status,
+		).toBe(201);
+		// The legacy already-published exact callback is covered too.
+		expect(
+			run({
+				client_name: 'ChatGPT',
+				redirect_uris: ['https://chatgpt.com/connector_platform_oauth_redirect'],
+			}).res.status,
+		).toBe(201);
 	});
 
 	it.each([

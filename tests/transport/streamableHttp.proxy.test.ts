@@ -1,62 +1,26 @@
 import { describe, it, expect, afterEach, beforeEach, vi } from 'vitest';
 
-// Importing streamableHttp.ts runs its module top-level boot (config load,
-// startup guard, app.listen). Mock the config + mwn provider so that boot is
-// harmless under test, matching the sibling streamableHttp.*.test.ts files. This
-// e2e test does NOT use the module-level booted `app`; it calls the exported
-// buildApp() factory directly with a fake-AS-backed proxy config, so the boot's
-// proxy stays disabled (the mock config has no oauth2ClientId).
-vi.mock('../../src/config/loadConfig.js', async (importOriginal) => {
-	const actual = await importOriginal<typeof import('../../src/config/loadConfig.js')>();
-	return {
-		...actual,
-		loadConfigFromFile: () => ({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test',
-					server: 'https://test.example',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-	};
-});
-
-vi.mock('../../src/wikis/mwnProvider.js', () => ({
-	MwnProviderImpl: class {
-		get = () => Promise.reject(new Error('mwn not available in tests'));
-		invalidate = () => {};
-	},
-}));
-
 import request from 'supertest';
-import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
-import {
-	buildApp,
-	resolveUpstreamBearer,
-	type BuildAppDeps,
-	type SessionRegistry,
-} from '../../src/transport/streamableHttp.js';
-import { createAppState } from '../../src/wikis/state.js';
-import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.js';
-import { verifyAccessToken } from '../../src/auth/authorizationServer/jwt.js';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.js';
+import type { RequestHandler } from 'express';
+import { McpServer, PARSE_ERROR } from '@modelcontextprotocol/server';
+import { buildApp, type BuildAppDeps } from '../../src/transport/streamableHttp.ts';
+import { resolveUpstreamBearer } from '../../src/auth/upstreamBearer.ts';
+import { createAppState } from '../../src/wikis/state.ts';
+import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
+import { CimdResolver } from '../../src/auth/authorizationServer/cimd.ts';
+import type { CimdFetchResult } from '../../src/auth/authorizationServer/cimd.ts';
+import { verifyAccessToken } from '../../src/auth/authorizationServer/jwt.ts';
+import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
 import {
 	buildRedirectPolicy,
 	parseRedirectAllowlist,
-} from '../../src/auth/authorizationServer/redirectPolicy.js';
-import { checkWikiCapability } from '../../src/runtime/wikiCapability.js';
-import { createToolContext } from '../../src/runtime/createContext.js';
-import { logger } from '../../src/runtime/logger.js';
-import { withRequestContext, getRuntimeToken } from '../../src/transport/requestContext.js';
-import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.js';
-import { runHostedFlow } from '../helpers/fakeMcpClient.js';
+} from '../../src/auth/authorizationServer/redirectPolicy.ts';
+import { checkWikiCapability } from '../../src/runtime/wikiCapability.ts';
+import { createToolContext } from '../../src/runtime/createContext.ts';
+import { logger } from '../../src/runtime/logger.ts';
+import { withRequestContext, getRuntimeToken } from '../../src/runtime/requestContext.ts';
+import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
+import { runHostedFlow, setCookieHeaders } from '../helpers/fakeMcpClient.ts';
 
 const ISSUER = 'https://mcp.example/mcp';
 const SIGNING_KEY = 'k'.repeat(32);
@@ -96,35 +60,154 @@ function proxyConfig(fakeAsUrl: string): ProxyConfig {
 		consentTtlMs: 60_000,
 		tokenTtlMs: 55 * 60 * 1000,
 		redirectAllowlist: [],
+		cimdAllowedHosts: [],
 	};
 }
 
-// Stub MCP server; never actually connected because the /mcp tests pre-seed a
-// fake transport into the returned sessions registry.
 function stubCreateServer(): McpServer {
 	return new McpServer({ name: 'proxy-e2e', version: '0.0.0' }, { capabilities: {} });
 }
 
+// The per-request server factory is the capture seam: it runs inside
+// withRequestContext during serving, so an onServe hook observes the resolved
+// runtime token for the request being served.
 function makeDeps(
 	fakeAsUrl: string,
 	store: InMemoryProxyStore,
 	pc: ProxyConfig | null,
+	onServe?: () => void | Promise<void>,
 ): BuildAppDeps {
 	return {
 		state: appState(fakeAsUrl),
 		getProxyConfig: () => pc,
 		proxyStore: store,
 		proxyRedirectPolicy: pc ? buildRedirectPolicy(pc.redirectAllowlist) : null,
+		cimdResolver: null,
 		defaultWikiKey: 'test',
 		defaultWikiSitename: 'Test Wiki',
-		createServerFn: stubCreateServer,
+		createServerFn: async () => {
+			await onServe?.();
+			return stubCreateServer();
+		},
 		host: '127.0.0.1',
 		allowedHosts: undefined,
-		allowedOrigins: undefined,
+		allowedOrigins: [],
 		maxRequestBody: '1mb',
-		sessionIdleTimeoutMs: 0,
 	};
 }
+
+// Origin validation must guard the MCP endpoint itself without reaching the
+// authorization-server routes that sit beneath the same /mcp prefix. Those are
+// browser-facing: the consent form POSTs from the server's OWN origin, which an
+// operator who allowlists only their client origins would never have listed, so
+// a prefix-mounted guard would 403 the Approve click and kill every sign-in.
+describe('hosted OAuth proxy — Origin validation scope', () => {
+	const AS_URL = 'https://as.example';
+
+	function appWithOrigins(allowedOrigins: string[]) {
+		const pc = proxyConfig(AS_URL);
+		return buildApp({ ...makeDeps(AS_URL, new InMemoryProxyStore(), pc), allowedOrigins }).app;
+	}
+
+	// Through the real buildApp wiring, not a hand-rolled app: an empty allowlist
+	// is the default on a public bind, and the guard has to be mounted for it.
+	it('rejects every Origin on the MCP endpoint when the allowlist is empty', async () => {
+		const res = await request(appWithOrigins([]))
+			.post('/mcp')
+			.set('Accept', 'application/json, text/event-stream')
+			.set('Origin', 'https://anything.example')
+			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+		expect(res.status).toBe(403);
+	});
+
+	it('still serves a request carrying no Origin when the allowlist is empty', async () => {
+		const res = await request(appWithOrigins([]))
+			.post('/mcp')
+			.set('Accept', 'application/json, text/event-stream')
+			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
+		expect(res.status).toBe(200);
+	});
+
+	// Express answers OPTIONS from its own default handler, which sits outside
+	// the route stack and so outside the guard unless the verb is routed.
+	it('applies the Origin guard to OPTIONS as well', async () => {
+		const res = await request(appWithOrigins(['https://client.example']))
+			.options('/mcp')
+			.set('Origin', 'https://evil.example');
+		expect(res.status).toBe(403);
+	});
+
+	it('rejects a non-allowlisted Origin on the MCP endpoint', async () => {
+		const res = await request(appWithOrigins(['https://client.example']))
+			.post('/mcp')
+			.set('Accept', 'application/json, text/event-stream')
+			.set('Origin', 'https://mcp.example')
+			.send({
+				jsonrpc: '2.0',
+				id: 1,
+				method: 'initialize',
+				params: {
+					protocolVersion: '2025-11-25',
+					capabilities: {},
+					clientInfo: { name: 'c', version: '0.0.0' },
+				},
+			});
+		expect(res.status).toBe(403);
+		expect(res.body?.error?.message).toMatch(/Invalid Origin/);
+	});
+
+	it.each([
+		['/mcp/consent', 'post'],
+		['/mcp/token', 'post'],
+		['/mcp/register', 'post'],
+	] as const)('does not apply Origin validation to %s', async (path, method) => {
+		const agent = request(appWithOrigins(['https://client.example']));
+		const res = await agent[method](path).set('Origin', 'https://mcp.example').send({});
+		// These endpoints may still refuse the request on their own terms (missing
+		// consent cookie, bad grant, unregistered client). What must never happen is
+		// a rejection by the Origin guard.
+		expect(JSON.stringify(res.body ?? '')).not.toMatch(/Invalid Origin/);
+	});
+});
+
+// express.json() is mounted app-wide, so its parse failures reach the browser-facing
+// authorization-server routes as well as the JSON-RPC endpoint, and each needs its
+// own dialect. Driven through the real buildApp because the answer depends on where
+// the shaping handler sits in the middleware stack.
+describe('hosted OAuth proxy — malformed JSON body scope', () => {
+	const AS_URL = 'https://as.example';
+
+	function app() {
+		const pc = proxyConfig(AS_URL);
+		return buildApp(makeDeps(AS_URL, new InMemoryProxyStore(), pc)).app;
+	}
+
+	it('answers the MCP endpoint with a JSON-RPC parse error', async () => {
+		const res = await request(app())
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Accept', 'application/json, text/event-stream')
+			.send('{"jsonrpc":"2.0",');
+
+		expect(res.status).toBe(400);
+		expect(res.headers['content-type']).toMatch(/application\/json/);
+		expect(res.body?.error?.code).toBe(PARSE_ERROR);
+		expect(res.text).not.toMatch(/SyntaxError/);
+	});
+
+	it('answers a registration request with an OAuth error', async () => {
+		const res = await request(app())
+			.post('/mcp/register')
+			.set('Content-Type', 'application/json')
+			.send('{bad');
+
+		expect(res.status).toBe(400);
+		expect(res.headers['content-type']).toMatch(/application\/json/);
+		expect(res.body?.jsonrpc).toBeUndefined();
+		expect(res.body?.error).toBe('invalid_request');
+		expect(res.text).not.toMatch(/SyntaxError/);
+	});
+});
 
 describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 	let fakeAs: FakeAsHandle | undefined;
@@ -151,7 +234,15 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		fakeAs = await startFakeAs({ autoApproveAuthorize: true, captureApi: true });
 		const store = new InMemoryProxyStore();
 		const pc = proxyConfig(fakeAs.url);
-		const { app, sessions } = buildApp(makeDeps(fakeAs.url, store, pc));
+		// The factory seam calls the wiki action API with the request's resolved
+		// runtime token, standing in for what mwn would send to /api.php.
+		const onServe = vi.fn(async () => {
+			const runtimeToken = getRuntimeToken();
+			await fetch(`${fakeAs!.url}/w/api.php?action=query&meta=tokens`, {
+				headers: runtimeToken ? { Authorization: `Bearer ${runtimeToken}` } : {},
+			});
+		});
+		const { app } = buildApp(makeDeps(fakeAs.url, store, pc, onServe));
 
 		const result = await runHostedFlow({ app });
 
@@ -165,39 +256,28 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 
 		// The stored upstream token is the wiki access token the fake AS issued for
 		// the auto-approved code (`access-auth-<state>`), reachable via resolve.
-		const upstreamToken = await resolveUpstreamBearer(result.accessToken, pc, store);
+		const { accessToken: upstreamToken } = await resolveUpstreamBearer(
+			result.accessToken,
+			pc,
+			store,
+		);
 		expect(upstreamToken).toMatch(/^access-auth-/);
 		// The proxy JWT and the upstream wiki token are distinct values.
 		expect(upstreamToken).not.toBe(result.accessToken);
 
-		// Now drive a REAL /mcp POST: pre-seed a session whose transport, inside
-		// withRequestContext, calls the wiki action API with the resolved runtime
-		// token. This proves the UPSTREAM token — not the proxy JWT — is what mwn
-		// would send to /api.php.
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
-				const runtimeToken = getRuntimeToken();
-				await fetch(`${fakeAs!.url}/w/api.php?action=query&meta=tokens`, {
-					headers: runtimeToken ? { Authorization: `Bearer ${runtimeToken}` } : {},
-				});
-				res.status(200).json({ ok: true });
-			},
-		);
-		const transport = {
-			sessionId: 'sid-1',
-			handleRequest,
-		} as unknown as SessionRegistry[string]['transport'];
-		sessions['sid-1'] = { transport, activeRequests: 0 };
-
+		// Now drive a REAL /mcp POST: the per-request factory (onServe above),
+		// running inside withRequestContext, calls the wiki action API with the
+		// resolved runtime token. This proves the UPSTREAM token — not the proxy
+		// JWT — is what mwn would send to /api.php.
 		const mcpRes = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-1')
+			.set('Accept', 'application/json, text/event-stream')
 			.set('Authorization', `Bearer ${result.accessToken}`)
 			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
 
 		expect(mcpRes.status).not.toBe(401);
-		expect(handleRequest).toHaveBeenCalledOnce();
+		expect(onServe).toHaveBeenCalled();
 		// The wiki API saw the UPSTREAM wiki token, never the proxy JWT.
 		expect(fakeAs.capturedApiBearers).toContain(upstreamToken);
 		expect(fakeAs.capturedApiBearers).not.toContain(result.accessToken);
@@ -212,7 +292,11 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		const result = await runHostedFlow({ app });
 
 		// Resolve the upstream wiki token the proxy is holding for this grant.
-		const upstreamToken = await resolveUpstreamBearer(result.accessToken, pc, store);
+		const { accessToken: upstreamToken } = await resolveUpstreamBearer(
+			result.accessToken,
+			pc,
+			store,
+		);
 		expect(upstreamToken).toMatch(/^access-auth-/);
 
 		const tokenJson = JSON.stringify(result.tokenBody);
@@ -230,29 +314,19 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		fakeAs = await startFakeAs({ autoApproveAuthorize: true });
 		const store = new InMemoryProxyStore();
 		const pc = proxyConfig(fakeAs.url);
-		const deps = makeDeps(fakeAs.url, store, pc);
-		const { app, sessions } = buildApp(deps);
 
 		// (a) A tokenless /mcp POST is served anonymously (no 401 short-circuit).
+		// The per-request factory seam observes the (absent) runtime token.
 		const captured: { token?: string; seen: boolean } = { seen: false };
-		const handleRequest = vi.fn(
-			async (_req: unknown, res: { status: (n: number) => { json: (b: unknown) => void } }) => {
-				captured.seen = true;
-				captured.token = getRuntimeToken();
-				res.status(200).json({ ok: true });
-			},
-		);
-		sessions['sid-anon'] = {
-			transport: {
-				sessionId: 'sid-anon',
-				handleRequest,
-			} as unknown as SessionRegistry[string]['transport'],
-			activeRequests: 0,
-		};
+		const deps = makeDeps(fakeAs.url, store, pc, () => {
+			captured.seen = true;
+			captured.token = getRuntimeToken();
+		});
+		const { app } = buildApp(deps);
 		const anonRes = await request(app)
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
-			.set('mcp-session-id', 'sid-anon')
+			.set('Accept', 'application/json, text/event-stream')
 			.send({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} });
 		expect(anonRes.status).not.toBe(401);
 		expect(captured.seen).toBe(true);
@@ -267,7 +341,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 			getProxyConfig: deps.getProxyConfig,
 		});
 
-		const writeResult = await withRequestContext(undefined, undefined, () =>
+		const writeResult = await withRequestContext(undefined, () =>
 			checkWikiCapability('update-page', 'test', ctx),
 		);
 		expect(writeResult).toBeDefined();
@@ -278,7 +352,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 
 		// A read-only tool (e.g. get-page) is NOT a write tool, so it passes the
 		// capability guard anonymously (returns undefined = proceed).
-		const readResult = await withRequestContext(undefined, undefined, () =>
+		const readResult = await withRequestContext(undefined, () =>
 			checkWikiCapability('get-page', 'test', ctx),
 		);
 		expect(readResult).toBeUndefined();
@@ -351,7 +425,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 			.post('/mcp/register')
 			.set('Content-Type', 'application/json')
 			.send({ redirect_uris: [redirectUri], client_name: 'CSRF' });
-		const { randomVerifier, s256 } = await import('../../src/auth/pkce.js');
+		const { randomVerifier, s256 } = await import('../../src/auth/pkce.ts');
 		const params = {
 			client_id: String(reg.body.client_id),
 			redirect_uri: redirectUri,
@@ -362,7 +436,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		};
 		const authz = await request(app).get('/mcp/authorize').query(params);
 		expect(authz.status).toBe(200);
-		const csrfSetCookie = ((authz.headers['set-cookie'] as string[] | undefined) ?? []).find((c) =>
+		const csrfSetCookie = setCookieHeaders(authz.headers['set-cookie']).find((c) =>
 			c.startsWith('mcp_consent_csrf='),
 		);
 		const csrf = csrfSetCookie ? csrfSetCookie.split(';')[0].split('=').slice(1).join('=') : '';
@@ -399,6 +473,134 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 			.send({ decision: 'approve', csrf });
 		expect(ok.status).toBe(302);
 	});
+	// OAuth 2.1 §4.1.2.1 splits authorization-endpoint failures: a page only when the
+	// client or redirect_uri could not be established, otherwise the error goes back
+	// to the client's own callback. Driven through the real app because the answer
+	// depends on the router branching on the plan, not just on the planner.
+	describe('authorization errors reach the client rather than a dead page', () => {
+		const REDIRECT = 'http://127.0.0.1:47311/cb';
+
+		async function registeredClient(app: ReturnType<typeof buildApp>['app']) {
+			const reg = await request(app)
+				.post('/mcp/register')
+				.set('Content-Type', 'application/json')
+				.send({ redirect_uris: [REDIRECT], client_name: 'E' });
+			const { randomVerifier, s256 } = await import('../../src/auth/pkce.ts');
+			return {
+				client_id: String(reg.body.client_id),
+				redirect_uri: REDIRECT,
+				response_type: 'code',
+				state: 'client-state-e',
+				code_challenge: s256(randomVerifier()),
+				code_challenge_method: 'S256',
+				resource: ISSUER,
+			};
+		}
+
+		it.each([
+			[
+				'a resource this server does not serve',
+				{ resource: 'https://other.example' },
+				'invalid_target',
+			],
+			[
+				'an unsupported code_challenge_method',
+				{ code_challenge_method: 'plain' },
+				'invalid_request',
+			],
+			['a missing code_challenge', { code_challenge: undefined }, 'invalid_request'],
+			[
+				'a response_type this server does not support',
+				{ response_type: 'token' },
+				'unsupported_response_type',
+			],
+		] as const)('redirects %s back as %s', async (_label, override, expected) => {
+			const pc = proxyConfig('https://as.example');
+			const { app } = buildApp(makeDeps('https://as.example', new InMemoryProxyStore(), pc));
+			const params = { ...(await registeredClient(app)), ...override };
+
+			const res = await request(app).get('/mcp/authorize').query(params);
+
+			expect(res.status).toBe(302);
+			const loc = new URL(res.headers.location as string);
+			expect(loc.origin + loc.pathname).toBe(REDIRECT);
+			expect(loc.searchParams.get('error')).toBe(expected);
+			// state round-trips, so the client can match the failure to its request.
+			expect(loc.searchParams.get('state')).toBe('client-state-e');
+			// Mandatory here, not decorative: asMetadata advertises
+			// authorization_response_iss_parameter_supported, which obliges a client to
+			// REJECT a response without iss — swallowing the error exactly as the old
+			// HTML page did.
+			expect(loc.searchParams.get('iss')).toBe(ISSUER);
+			// The only observable difference between this branch and falling through to
+			// the success path is the absence of this cookie: setTxnCookie reads `state`
+			// off the URL it is given, so a fall-through would plant the CLIENT's own
+			// state as the proxy transaction id. Asserted with a predicate because a
+			// negated `toContain` against an asymmetric matcher can never fail.
+			const setCookies = setCookieHeaders(res.headers['set-cookie']);
+			expect(setCookies.some((c) => c.startsWith('mcp_txn='))).toBe(false);
+		});
+
+		it.each([
+			['an unknown client_id', { client_id: 'nope-not-registered' }],
+			['a redirect_uri that is not registered', { redirect_uri: 'https://attacker.example/cb' }],
+		] as const)('renders a page for %s instead of redirecting', async (_label, override) => {
+			const pc = proxyConfig('https://as.example');
+			const { app } = buildApp(makeDeps('https://as.example', new InMemoryProxyStore(), pc));
+			const params = { ...(await registeredClient(app)), ...override };
+
+			const res = await request(app).get('/mcp/authorize').query(params);
+
+			// Redirecting here would make the endpoint an open redirector: the target
+			// has not been established as belonging to this client.
+			expect(res.status).toBe(400);
+			expect(res.headers.location).toBeUndefined();
+			expect(res.headers['content-type']).toMatch(/text\/html/);
+		});
+
+		it('redirects rather than dead-ends when approval itself fails validation', async () => {
+			const pc = proxyConfig('https://as.example');
+			const { app } = buildApp(makeDeps('https://as.example', new InMemoryProxyStore(), pc));
+			const params = await registeredClient(app);
+
+			// Reach consent legitimately, then submit the decision with a request that
+			// fails a post-redirect_uri check. Without its own branch the POST handler
+			// falls through to the "consent could not be applied" page, which is the
+			// same dead end on the client's side.
+			const authz = await request(app).get('/mcp/authorize').query(params);
+			const cookies = setCookieHeaders(authz.headers['set-cookie']);
+			const csrf = cookies.find((c) => c.startsWith('mcp_consent_csrf='))!.split(';')[0];
+			const csrfToken = csrf.split('=').slice(1).join('=');
+
+			const res = await request(app)
+				.post('/mcp/consent')
+				.query({ ...params, resource: 'https://other.example' })
+				.set('Cookie', csrf)
+				.type('form')
+				.send({ csrf: csrfToken, decision: 'approve' });
+
+			expect(res.status).toBe(302);
+			const loc = new URL(res.headers.location as string);
+			expect(loc.searchParams.get('error')).toBe('invalid_target');
+			expect(loc.searchParams.get('iss')).toBe(ISSUER);
+			const setCookies = setCookieHeaders(res.headers['set-cookie']);
+			expect(setCookies.some((c) => c.startsWith('mcp_txn='))).toBe(false);
+		});
+
+		it('still accepts a request that omits response_type', async () => {
+			const pc = proxyConfig('https://as.example');
+			const { app } = buildApp(makeDeps('https://as.example', new InMemoryProxyStore(), pc));
+			const { response_type: _dropped, ...params } = await registeredClient(app);
+
+			const res = await request(app).get('/mcp/authorize').query(params);
+
+			// Clients that omit it work today, so refusing them would newly break a
+			// working setup for no security gain.
+			expect(res.status).toBe(200);
+			expect(res.text).toContain('to use your');
+		});
+	});
+
 	it('criterion 6: a grant-screen denial (no state, MediaWiki unauthorized_client) is bounced to the client as access_denied via the txn cookie', async () => {
 		fakeAs = await startFakeAs({ autoApproveAuthorize: true });
 		const store = new InMemoryProxyStore();
@@ -416,7 +618,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 			.post('/mcp/register')
 			.set('Content-Type', 'application/json')
 			.send({ redirect_uris: [redirectUri], client_name: 'D' });
-		const { randomVerifier, s256 } = await import('../../src/auth/pkce.js');
+		const { randomVerifier, s256 } = await import('../../src/auth/pkce.ts');
 		const params = {
 			client_id: String(reg.body.client_id),
 			redirect_uri: redirectUri,
@@ -500,6 +702,108 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		expect(wwwAuth).toContain('error="invalid_token"');
 		expect(wwwAuth).toContain('resource_metadata=');
 	});
+
+	it('CIMD: a URL client_id on an allowlisted host resolves via its metadata document and reaches consent; an off-allowlist host is rejected', async () => {
+		const store = new InMemoryProxyStore();
+		const pc = proxyConfig('https://test.example');
+
+		// A URL client_id whose host is on the resolver's allowlist. The stub fetcher
+		// returns a self-referential document (client_id === the fetched URL) whose
+		// redirect_uris list the redirect the authorize request will send. NO network:
+		// the fetcher is a closure over the test's redirectUri.
+		const clientId = 'https://vscode.dev/oauth/client-metadata.json';
+		const redirectUri = 'https://vscode.dev/redirect';
+		let fetchCalls = 0;
+		const countingFetcher = async (url: string): Promise<CimdFetchResult> => {
+			fetchCalls++;
+			return {
+				status: 200,
+				body: JSON.stringify({
+					client_id: url,
+					client_name: 'VS Code',
+					redirect_uris: [redirectUri],
+				}),
+				cacheControl: null,
+			};
+		};
+		const cimdResolver = new CimdResolver((h) => h === 'vscode.dev', countingFetcher);
+
+		const { app } = buildApp({ ...makeDeps('https://test.example', store, pc), cimdResolver });
+
+		// Success: allowlisted host → document fetched, self-matches → consent page
+		// built from that document's own client_name and redirect_uris.
+		const ok = await request(app).get('/mcp/authorize').query({
+			response_type: 'code',
+			client_id: clientId,
+			code_challenge: 'abc123',
+			code_challenge_method: 'S256',
+			redirect_uri: redirectUri,
+			state: 's',
+			resource: ISSUER,
+		});
+		expect(ok.status).toBe(200);
+		expect(ok.text).toContain('vscode.dev');
+		// The name came from the fetched document, not from anything the request
+		// supplied — which is what proves the resolve actually happened.
+		expect(ok.text).toContain('Allow VS Code to use your');
+
+		// The allowed-host success above consulted the fetcher once; reset so the
+		// count below reflects ONLY the off-allowlist request.
+		fetchCalls = 0;
+
+		// Rejection: the host is NOT on the allowlist, so the gate fails BEFORE the
+		// fetcher is ever consulted → the 400 auth-error page.
+		const rejected = await request(app).get('/mcp/authorize').query({
+			response_type: 'code',
+			client_id: 'https://evil.example/c.json',
+			code_challenge: 'abc123',
+			code_challenge_method: 'S256',
+			redirect_uri: redirectUri,
+			state: 's',
+			resource: ISSUER,
+		});
+		expect(rejected.status).toBe(400);
+		expect(rejected.headers['content-type']).toMatch(/html/);
+		expect(rejected.text).toMatch(/Authorization failed/);
+		// The host allowlist gate ran before any fetch, and the CIMD rejection reason
+		// (not just a generic error title) is rendered on the page.
+		expect(fetchCalls).toBe(0);
+		expect(rejected.text).toMatch(/not a trusted CIMD host|evil\.example/);
+	});
+
+	it('CIMD: rejects a document that lists a cleartext http non-loopback redirect', async () => {
+		const store = new InMemoryProxyStore();
+		const pc = proxyConfig('https://test.example');
+		const clientId = 'https://vscode.dev/oauth/client-metadata.json';
+		const badRedirect = 'http://evil.example/cb';
+		// Allowlisted host, but the fetched document declares a cleartext http redirect to
+		// a non-loopback host — validateCimdDocument rejects it, so resolve fails and
+		// /authorize renders the 400 auth-error page. No code is ever minted.
+		const fetcher = async (url: string): Promise<CimdFetchResult> => ({
+			status: 200,
+			body: JSON.stringify({
+				client_id: url,
+				client_name: 'VS Code',
+				redirect_uris: [badRedirect],
+			}),
+			cacheControl: null,
+		});
+		const cimdResolver = new CimdResolver((h) => h === 'vscode.dev', fetcher);
+		const { app } = buildApp({ ...makeDeps('https://test.example', store, pc), cimdResolver });
+
+		const res = await request(app).get('/mcp/authorize').query({
+			response_type: 'code',
+			client_id: clientId,
+			code_challenge: 'abc123',
+			code_challenge_method: 'S256',
+			redirect_uri: badRedirect,
+			state: 's',
+			resource: ISSUER,
+		});
+		expect(res.status).toBe(400);
+		expect(res.headers['content-type']).toMatch(/html/);
+		expect(res.text).toMatch(/Authorization failed/);
+	});
 });
 
 describe('private wiki — connection-time auth challenge', () => {
@@ -541,14 +845,14 @@ describe('private wiki — connection-time auth challenge', () => {
 			getProxyConfig: () => pc,
 			proxyStore: store,
 			proxyRedirectPolicy: pc ? buildRedirectPolicy(pc.redirectAllowlist) : null,
+			cimdResolver: null,
 			defaultWikiKey: 'test',
 			defaultWikiSitename: 'Test Wiki',
 			createServerFn: stubCreateServer,
 			host: '127.0.0.1',
 			allowedHosts: undefined,
-			allowedOrigins: undefined,
+			allowedOrigins: [],
 			maxRequestBody: '1mb',
-			sessionIdleTimeoutMs: 0,
 		};
 	}
 
@@ -573,6 +877,7 @@ describe('private wiki — connection-time auth challenge', () => {
 			});
 
 		expect(res.status).toBe(401);
+		expect(res.body?.id).toBe(1);
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- supertest header value is string|string[]
 		const wwwAuth = res.headers['www-authenticate'] as string;
 		expect(wwwAuth).toContain('error="invalid_token"');
@@ -588,6 +893,8 @@ describe('private wiki — connection-time auth challenge', () => {
 		const res = await request(app).get('/mcp').set('mcp-session-id', 'irrelevant');
 
 		expect(res.status).toBe(401);
+		// A body-less method carries no id to attribute the error to.
+		expect('id' in (res.body as object)).toBe(false);
 	});
 
 	it('does NOT challenge an anonymous request when the wiki is public', async () => {
@@ -626,14 +933,15 @@ describe('private wiki — connection-time auth challenge', () => {
 			state,
 			getProxyConfig: () => null,
 			proxyStore: new InMemoryProxyStore(),
+			proxyRedirectPolicy: null,
+			cimdResolver: null,
 			defaultWikiKey: 'test',
 			defaultWikiSitename: 'Test Wiki',
 			createServerFn: stubCreateServer,
 			host: '127.0.0.1',
 			allowedHosts: undefined,
-			allowedOrigins: undefined,
+			allowedOrigins: [],
 			maxRequestBody: '1mb',
-			sessionIdleTimeoutMs: 0,
 		});
 
 		expect(warnSpy).toHaveBeenCalledWith(
@@ -665,14 +973,15 @@ describe('private wiki — connection-time auth challenge', () => {
 			state,
 			getProxyConfig: () => null,
 			proxyStore: new InMemoryProxyStore(),
+			proxyRedirectPolicy: null,
+			cimdResolver: null,
 			defaultWikiKey: 'test',
 			defaultWikiSitename: 'Test Wiki',
 			createServerFn: stubCreateServer,
 			host: '127.0.0.1',
 			allowedHosts: undefined,
-			allowedOrigins: undefined,
+			allowedOrigins: [],
 			maxRequestBody: '1mb',
-			sessionIdleTimeoutMs: 0,
 		});
 
 		expect(warnSpy).not.toHaveBeenCalledWith(
@@ -779,7 +1088,165 @@ describe('operator redirect allowlist — end-to-end (config → route → handl
 			resource: ISSUER,
 		});
 		expect(authz.status).toBe(200);
-		expect(authz.text).toContain('an application on this device');
+		expect(authz.text).toContain('on this device');
+		// Through the real route, not just the renderer: the host the grant will be
+		// sent to has to reach the page the user actually sees.
+		expect(authz.text).toContain(new URL(redirectUri).hostname);
+		expect(authz.text).toContain('Allow only if you started this sign-in a moment ago');
+	});
+});
+
+// Exercises the REAL proactive-refresh path on the /mcp connection: buildApp uses
+// the production refresh (defaultRefresh) against a live fake AS, so the full
+// oauthFlow.refreshTokens -> classifyRefreshError -> UpstreamBearerError chain runs
+// over HTTP — not through an injected refresh stub.
+describe('hosted OAuth proxy — upstream refresh on the /mcp path (e2e)', () => {
+	let fakeAs: FakeAsHandle | undefined;
+
+	beforeEach(() => {
+		vi.stubEnv('MCP_PUBLIC_URL', ISSUER);
+	});
+	afterEach(async () => {
+		vi.unstubAllEnvs();
+		await fakeAs?.close();
+		fakeAs = undefined;
+	});
+
+	// Mints normally on the auth-code grant but fails the refresh grant with a
+	// transient 503, standing in for a momentary wiki outage during the proactive
+	// refresh.
+	const refreshBlipsToken: RequestHandler = (req, res) => {
+		const grant = String(req.body.grant_type ?? '');
+		if (grant === 'authorization_code') {
+			res.json({
+				access_token: 'access-' + String(req.body.code),
+				refresh_token: 'refresh-' + String(req.body.code),
+				expires_in: 3600,
+				scope: 'edit',
+				token_type: 'Bearer',
+			});
+			return;
+		}
+		if (grant === 'refresh_token') {
+			res.status(503).end();
+			return;
+		}
+		res.status(400).json({ error: 'unsupported_grant_type' });
+	};
+
+	// Overrides the stored upstream token's expiry (leaving its tokens intact) so a
+	// subsequent /mcp call takes the proactive-refresh branch. Returns the stored
+	// upstream access token so a test can assert which token reaches the wiki API.
+	async function setUpstreamExpiry(
+		store: InMemoryProxyStore,
+		pc: ProxyConfig,
+		proxyAccessToken: string,
+		expiresAt: number,
+	): Promise<string> {
+		const { upstreamTokenId } = await verifyAccessToken(proxyAccessToken, pc);
+		const u = store.getUpstreamToken(upstreamTokenId);
+		if (!u) {
+			throw new Error('expected an upstream token in the store');
+		}
+		store.updateUpstreamToken(upstreamTokenId, {
+			accessToken: u.accessToken,
+			refreshToken: u.refreshToken,
+			expiresAt,
+		});
+		return u.accessToken;
+	}
+
+	// Calls the wiki action API with the runtime token resolved for the request,
+	// standing in for what mwn would send upstream. Handed to makeDeps as the
+	// per-request factory seam.
+	function apiCallingOnServe() {
+		return vi.fn(async () => {
+			const runtimeToken = getRuntimeToken();
+			await fetch(`${fakeAs!.url}/w/api.php?action=query&meta=tokens`, {
+				headers: runtimeToken ? { Authorization: `Bearer ${runtimeToken}` } : {},
+			});
+		});
+	}
+
+	const MCP_BODY = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
+
+	it('answers 503 (retryable, no re-auth challenge) when an expired token cannot be refreshed', async () => {
+		fakeAs = await startFakeAs({ autoApproveAuthorize: true, token: refreshBlipsToken });
+		const store = new InMemoryProxyStore();
+		const pc = proxyConfig(fakeAs.url);
+		const { app } = buildApp(makeDeps(fakeAs.url, store, pc));
+		const result = await runHostedFlow({ app });
+		await setUpstreamExpiry(store, pc, result.accessToken, Date.now() - 1000);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Authorization', `Bearer ${result.accessToken}`)
+			.send(MCP_BODY);
+
+		expect(res.status).toBe(503);
+		// A retryable failure must NOT tell the client to re-authenticate.
+		expect(res.headers['www-authenticate']).toBeUndefined();
+	});
+
+	it('serves the request with the still-valid upstream token when a proactive refresh blips', async () => {
+		fakeAs = await startFakeAs({
+			autoApproveAuthorize: true,
+			captureApi: true,
+			token: refreshBlipsToken,
+		});
+		const store = new InMemoryProxyStore();
+		const pc = proxyConfig(fakeAs.url);
+		const onServe = apiCallingOnServe();
+		const { app } = buildApp(makeDeps(fakeAs.url, store, pc, onServe));
+		const result = await runHostedFlow({ app });
+		// Inside the 30s skew but still valid: the refresh runs and blips, and the
+		// current token is still usable.
+		const upstreamAccess = await setUpstreamExpiry(
+			store,
+			pc,
+			result.accessToken,
+			Date.now() + 10_000,
+		);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Accept', 'application/json, text/event-stream')
+			.set('Authorization', `Bearer ${result.accessToken}`)
+			.send(MCP_BODY);
+
+		expect(res.status).not.toBe(401);
+		expect(res.status).not.toBe(503);
+		expect(onServe).toHaveBeenCalledOnce();
+		// The wiki API saw the still-valid upstream token, not a re-auth.
+		expect(fakeAs.capturedApiBearers).toContain(upstreamAccess);
+	});
+
+	it('refreshes the upstream token server-to-server and the NEW token reaches the wiki API', async () => {
+		fakeAs = await startFakeAs({ autoApproveAuthorize: true, captureApi: true });
+		const store = new InMemoryProxyStore();
+		const pc = proxyConfig(fakeAs.url);
+		const onServe = apiCallingOnServe();
+		const { app } = buildApp(makeDeps(fakeAs.url, store, pc, onServe));
+		const result = await runHostedFlow({ app });
+		await setUpstreamExpiry(store, pc, result.accessToken, Date.now() + 10_000);
+
+		const res = await request(app)
+			.post('/mcp')
+			.set('Content-Type', 'application/json')
+			.set('Accept', 'application/json, text/event-stream')
+			.set('Authorization', `Bearer ${result.accessToken}`)
+			.send(MCP_BODY);
+
+		expect(res.status).not.toBe(401);
+		expect(onServe).toHaveBeenCalledOnce();
+		// The default fake AS rotates on refresh, so the wiki API sees the refreshed
+		// token and the store now holds the rotated pair.
+		expect(fakeAs.capturedApiBearers).toContain('access-refreshed');
+		const { upstreamTokenId } = await verifyAccessToken(result.accessToken, pc);
+		expect(store.getUpstreamToken(upstreamTokenId)?.accessToken).toBe('access-refreshed');
+		expect(store.getUpstreamToken(upstreamTokenId)?.refreshToken).toBe('refresh-rotated');
 	});
 });
 
@@ -799,7 +1266,7 @@ async function runFlowUpToCode(
 	// Use a fixed, valid PKCE pair the test controls; the verifier matching the
 	// challenge is what client B would submit — we deliberately submit a DIFFERENT
 	// one at redemption time.
-	const { randomVerifier, s256 } = await import('../../src/auth/pkce.js');
+	const { randomVerifier, s256 } = await import('../../src/auth/pkce.ts');
 	const verifier = randomVerifier();
 	const params = {
 		client_id: clientId,
@@ -810,7 +1277,7 @@ async function runFlowUpToCode(
 		scope: 'mwoauth-authonly',
 	};
 	const authz = await request(app).get('/mcp/authorize').query(params);
-	const csrfSetCookie = ((authz.headers['set-cookie'] as string[] | undefined) ?? []).find((c) =>
+	const csrfSetCookie = setCookieHeaders(authz.headers['set-cookie']).find((c) =>
 		c.startsWith('mcp_consent_csrf='),
 	);
 	const csrf = csrfSetCookie ? csrfSetCookie.split(';')[0].split('=').slice(1).join('=') : '';
@@ -820,8 +1287,7 @@ async function runFlowUpToCode(
 		.set('Cookie', `mcp_consent_csrf=${csrf}`)
 		.type('form')
 		.send({ decision: 'approve', csrf });
-	// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- supertest header value is string|string[]
-	const cookie = (consent.headers['set-cookie'] as string[])[0].split(';')[0];
+	const cookie = setCookieHeaders(consent.headers['set-cookie'])[0].split(';')[0];
 	const upstream = await fetch(consent.headers.location, { redirect: 'manual' });
 	const cb = new URL(upstream.headers.get('location')!);
 	const cbRes = await request(app)
@@ -844,7 +1310,7 @@ async function callbackWithMismatchedConsent(
 	text: string;
 	headers: Record<string, string>;
 }> {
-	const { buildConsentCookie } = await import('../../src/auth/authorizationServer/consent.js');
+	const { buildConsentCookie } = await import('../../src/auth/authorizationServer/consent.ts');
 	// A transaction owned by client "B-real".
 	store.putTransaction('txn-mismatch', {
 		clientId: 'B-real',

@@ -1,9 +1,9 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from '../../../runtime/tool.js';
-import type { ToolContext } from '../../../runtime/context.js';
-import type { TruncationInfo } from '../../../results/truncation.js';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
+import type { Tool } from '../../../runtime/tool.ts';
+import type { ToolContext } from '../../../runtime/context.ts';
+import type { TruncationInfo } from '../../../results/truncation.ts';
+import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
 
 const inputSchema = {
 	cypher: z
@@ -39,7 +39,7 @@ export const neowikiCypherQuery: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'run NeoWiki Cypher query',
 	target: (a) => a.cypher,
 

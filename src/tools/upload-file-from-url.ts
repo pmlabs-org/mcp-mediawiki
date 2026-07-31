@@ -1,12 +1,12 @@
 import { z } from 'zod';
-import type { CallToolResult, ToolAnnotations } from '@modelcontextprotocol/sdk/types.js';
+import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
-import type { Tool } from '../runtime/tool.js';
-import type { ToolContext } from '../runtime/context.js';
-import { errorMessage } from '../errors/isErrnoException.js';
-import { fetchFileBytes, shouldRescueToWiki } from '../transport/httpFetch.js';
-import { formatEditComment, buildPageUrl } from '../wikis/utils.js';
+import type { Tool } from '../runtime/tool.ts';
+import type { ToolContext } from '../runtime/context.ts';
+import { errorMessage } from '../errors/isErrnoException.ts';
+import { fetchFileBytes, shouldRescueToWiki } from '../transport/httpFetch.ts';
+import { formatEditComment, buildPageUrl } from '../wikis/utils.ts';
 
 const inputSchema = {
 	url: z.string().url().describe('URL of the file to upload'),
@@ -26,14 +26,14 @@ export const uploadFileFromUrl: Tool<typeof inputSchema> = {
 		destructiveHint: false,
 		idempotentHint: true,
 		openWorldHint: true,
-	} as ToolAnnotations,
+	},
 	failureVerb: 'upload file',
 	target: (a) => a.title,
 
 	async handle({ url, title, text, comment }, ctx: ToolContext): Promise<CallToolResult> {
 		const mwn = await ctx.mwn();
 		const baseParams: ApiUploadParams = {
-			comment: formatEditComment('upload-file-from-url', comment),
+			comment: formatEditComment(ctx, 'upload-file-from-url', comment),
 		};
 
 		// Server-first: fetch the bytes ourselves (SSRF-guarded, size-capped) and

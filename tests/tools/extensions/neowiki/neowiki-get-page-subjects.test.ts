@@ -1,8 +1,8 @@
 import { describe, it, expect, vi } from 'vitest';
-import { createMockMwn } from '../../../helpers/mock-mwn.js';
-import { fakeContext } from '../../../helpers/fakeContext.js';
-import { neowikiGetPageSubjects } from '../../../../src/tools/extensions/neowiki/neowiki-get-page-subjects.js';
-import { assertStructuredError } from '../../../helpers/structuredResult.js';
+import { createMockMwn } from '../../../helpers/mock-mwn.ts';
+import { fakeContext } from '../../../helpers/fakeContext.ts';
+import { neowikiGetPageSubjects } from '../../../../src/tools/extensions/neowiki/neowiki-get-page-subjects.ts';
+import { assertStructuredError } from '../../../helpers/structuredResult.ts';
 
 const pageSubjectsBody = {
 	data: {
@@ -13,7 +13,7 @@ const pageSubjectsBody = {
 				id: 'sMain',
 				label: 'Rijksmuseum',
 				schema: 'Museum',
-				statements: { Founded: { type: 'number', value: 1800 } },
+				statements: { Founded: { propertyType: 'number', value: 1800 } },
 			},
 			sChild: { id: 'sChild', label: 'Rijksmuseum 2024', schema: 'Attendance', statements: {} },
 		},
@@ -39,7 +39,12 @@ describe('neowiki-get-page-subjects', () => {
 			pageId: 65,
 			mainSubjectId: 'sMain',
 			subjects: [
-				{ id: 'sMain', isMain: true, schema: 'Museum' },
+				{
+					id: 'sMain',
+					isMain: true,
+					schema: 'Museum',
+					statements: [{ property: 'Founded', type: 'number', value: 1800 }],
+				},
 				{ id: 'sChild', isMain: false, schema: 'Attendance' },
 			],
 		});
