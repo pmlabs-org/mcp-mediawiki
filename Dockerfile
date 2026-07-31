@@ -37,6 +37,9 @@ COPY server.json ./
 # Install only production dependencies
 RUN npm ci --omit=dev --ignore-scripts
 
+# Copy Pathfinder oauth-proxy and startup script
+COPY oauth-proxy.js start.sh ./
+
 # Use a non-root user for security
 RUN addgroup -S nodejs \
 	&& adduser -S -G nodejs nodejs \
@@ -65,4 +68,4 @@ HEALTHCHECK --interval=30s --timeout=3s --start-period=5s \
   CMD [ "node", "-e", "require('http').get('http://localhost:8080/health', (res) => process.exit(res.statusCode == 200 ? 0 : 1))" ]
 
 # Start the server
-CMD ["node", "dist/index.js"]
+CMD ["/bin/sh", "start.sh"]
