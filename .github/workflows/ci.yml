@@ -64,3 +64,10 @@ jobs:
             ghcr.io/pmlabs-org/mcp-mediawiki:${{ github.sha }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
+
+      - name: Deploy to droplet
+        run: |
+          ssh ${{ secrets.DEPLOY_USER }}@${{ secrets.DEPLOY_HOST }} \
+            "cd /opt/pmin-mcpinfrastructure \
+            && docker compose pull mediawiki \
+            && docker compose up -d --force-recreate mediawiki"
