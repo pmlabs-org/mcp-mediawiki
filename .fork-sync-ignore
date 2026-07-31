@@ -20,3 +20,10 @@ af870f0b11d001e4388a289bce524e981dbcf017  # security-scan: suspiciously long lin
 # CHANGELOG resolution in 9b4b16c diverges — kept [Unreleased] content from
 # 8fc9af3 (chronologically later). Applied as 3de9c5d.
 9b4b16cdfd37ce86572d4eb4e41434d2357be411  applied as 3de9c5d (0.13.1 release — CHANGELOG conflict resolved with out-of-order cherry-picks)
+
+# --- mcp-mediawiki: redirect allowlist (2026-07-31) ---
+# 0e4f69f adds operator-configured redirect allowlist for hosted OAuth proxy.
+# All code changes applied cleanly; CHANGELOG conflict only — HEAD is a superset
+# (later commits 8fc9af3 already captured an expanded version of these entries).
+# Applied as 6aec655.
+0e4f69f3d33f0d233c962f7fad320c063f637b41  applied as 6aec655 (redirect allowlist — CHANGELOG kept HEAD, superset from later cherry-picks)
