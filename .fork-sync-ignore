@@ -13,3 +13,10 @@ d9932fddb3f5867afe38d2cea86a7864b8f12bd7  # Bump actions/checkout v6→v7 — ir
 
 # Auto-blocked by security scanner 2026-07-31T05:30:29+00:00
 af870f0b11d001e4388a289bce524e981dbcf017  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
+
+# --- mcp-mediawiki: out-of-order cherry-picks (2026-07-31) ---
+# 9b4b16c is the v0.13.1 release commit but was applied AFTER 8fc9af3
+# (confidential OAuth proxy, chronologically later) due to conflict ordering.
+# CHANGELOG resolution in 9b4b16c diverges — kept [Unreleased] content from
+# 8fc9af3 (chronologically later). Applied as 3de9c5d.
+9b4b16cdfd37ce86572d4eb4e41434d2357be411  applied as 3de9c5d (0.13.1 release — CHANGELOG conflict resolved with out-of-order cherry-picks)
