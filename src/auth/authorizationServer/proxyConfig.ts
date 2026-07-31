@@ -1,3 +1,5 @@
+import { parseRedirectAllowlist, type RedirectAllowlist } from './redirectPolicy.js';
+
 export class ProxyConfigError extends Error {
 	public constructor(message: string) {
 		super(message);
@@ -20,6 +22,7 @@ export interface ProxyConfig {
 	signingKey: string;
 	consentTtlMs: number;
 	tokenTtlMs: number;
+	redirectAllowlist: RedirectAllowlist;
 }
 
 const UPSTREAM_REFRESH_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -103,6 +106,15 @@ export function resolveProxyConfig(
 		? parseDurationMs(env.MCP_OAUTH_CONSENT_TTL)
 		: DEFAULT_CONSENT_TTL_MS;
 
+	let redirectAllowlist: RedirectAllowlist;
+	try {
+		redirectAllowlist = parseRedirectAllowlist(env.MCP_OAUTH_ALLOWED_REDIRECTS);
+	} catch (e) {
+		throw new ProxyConfigError(
+			`MCP_OAUTH_ALLOWED_REDIRECTS: ${e instanceof Error ? e.message : String(e)}`,
+		);
+	}
+
 	return {
 		issuer,
 		authorizeBase: stripTrailingSlash(wiki.publicServer?.trim() || wiki.server),
@@ -114,6 +126,7 @@ export function resolveProxyConfig(
 		signingKey,
 		consentTtlMs,
 		tokenTtlMs,
+		redirectAllowlist,
 	};
 }
 

@@ -37,6 +37,7 @@ import { InMemoryProxyStore, type ProxyStore } from '../auth/authorizationServer
 import { refreshTokens as defaultRefresh, type RefreshArgs } from '../auth/oauthFlow.js';
 import { buildAsMetadata } from '../auth/authorizationServer/asMetadata.js';
 import { handleRegister } from '../auth/authorizationServer/register.js';
+import { buildRedirectPolicy } from '../auth/authorizationServer/redirectPolicy.js';
 import {
 	planAuthorize,
 	planDeny,
@@ -708,7 +709,14 @@ for (const warning of warnings) {
 // Resolve the proxy config eagerly so a ProxyConfigError fails the boot rather
 // than the first request. Memoized, so the route handlers below reuse the
 // cached result.
-const proxyEnabled = getDefaultProxyConfig() !== null;
+const eagerProxyConfig = getDefaultProxyConfig();
+const proxyEnabled = eagerProxyConfig !== null;
+// Built once: the register-time redirect predicate (built-ins + operator
+// entries from MCP_OAUTH_ALLOWED_REDIRECTS). /authorize keeps matching the
+// registered URIs verbatim and never re-applies this policy.
+const proxyRedirectPolicy = eagerProxyConfig
+	? buildRedirectPolicy(eagerProxyConfig.redirectAllowlist)
+	: null;
 emitStartupBanner(
 	{ transport: 'http', http: { host, port, allowedHosts, allowedOrigins, maxRequestBody } },
 	{
@@ -779,6 +787,10 @@ export interface BuildAppDeps {
 	state: AppState;
 	getProxyConfig: ProxyConfigGetter;
 	proxyStore: ProxyStore;
+	// The register-time redirect predicate, built once from the resolved proxy
+	// config (built-ins + operator allowlist). Null when the proxy is disabled,
+	// in which case /mcp/register 404s alongside the other proxy endpoints.
+	proxyRedirectPolicy: ((uri: string) => boolean) | null;
 	// The default wiki KEY (bound into the consent cookie) and human-readable
 	// sitename (shown on the consent page). Match getProxyConfig's wiki.
 	defaultWikiKey: string;
@@ -807,6 +819,7 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 		state,
 		getProxyConfig,
 		proxyStore: store,
+		proxyRedirectPolicy,
 		defaultWikiKey,
 		defaultWikiSitename,
 		createServerFn,
@@ -905,11 +918,11 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 	// express.json() middleware. handleRegister validates redirect_uris against
 	// the proxy's redirect policy before minting a public (PKCE-only) client.
 	app.post('/mcp/register', (req, res) => {
-		if (!getProxyConfig()) {
+		if (!getProxyConfig() || !proxyRedirectPolicy) {
 			res.status(404).end();
 			return;
 		}
-		const result = handleRegister(req.body, store);
+		const result = handleRegister(req.body, store, proxyRedirectPolicy);
 		res.status(result.status).json(result.body);
 	});
 
@@ -959,6 +972,7 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 					wiki: defaultWikiSitename,
 					authorizeQuery: serializeAuthorizeQuery(q),
 					csrfToken,
+					redirectHost: redirectHost ?? '',
 				}),
 			);
 			return;
@@ -1144,6 +1158,7 @@ const { app, sessions, inFlight } = buildApp({
 	state,
 	getProxyConfig: getDefaultProxyConfig,
 	proxyStore,
+	proxyRedirectPolicy,
 	defaultWikiKey,
 	defaultWikiSitename,
 	createServerFn: () => createServer(ctx),
