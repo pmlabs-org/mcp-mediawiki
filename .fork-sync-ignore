@@ -4,3 +4,6 @@
 
 d9932fddb3f5867afe38d2cea86a7864b8f12bd7  # Bump actions/checkout v6→v7 — irrelevant; Pathfinder's ci.yml is a full replacement using @v4 with its own build/deploy pipeline
 0ccb047597332fcd67cea14f4710e75726698bb9  # Bump actions/setup-node v6→v7 — CI-only; Pathfinder uses a custom pipeline replacing the entire upstream workflow
+
+# Auto-blocked by security scanner 2026-07-31T05:30:20+00:00
+28c509933fa7edb8f3d46538c52496e671c04b7a  # security-scan: eval with string
