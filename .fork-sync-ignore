@@ -7,3 +7,6 @@ d9932fddb3f5867afe38d2cea86a7864b8f12bd7  # Bump actions/checkout v6→v7 — ir
 
 # Auto-blocked by security scanner 2026-07-31T05:30:20+00:00
 28c509933fa7edb8f3d46538c52496e671c04b7a  # security-scan: eval with string
+
+# Auto-blocked by security scanner 2026-07-31T05:30:25+00:00
+8034fb46e4a0330d3409df5a48386ce16124ded4  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
