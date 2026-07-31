@@ -6,3 +6,5 @@
 !/package-lock.json
 !/tsconfig.json
 !/server.json
+!/oauth-proxy.js
+!/start.sh
