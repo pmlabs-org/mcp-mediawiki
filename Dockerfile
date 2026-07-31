@@ -38,7 +38,7 @@ COPY server.json ./
 RUN npm ci --omit=dev --ignore-scripts
 
 # Copy Pathfinder oauth-proxy and startup script
-COPY oauth-proxy.js start.sh ./
+COPY oauth-proxy.cjs start.sh ./
 
 # Use a non-root user for security
 RUN addgroup -S nodejs \

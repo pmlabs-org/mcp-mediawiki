@@ -15,4 +15,4 @@ while [ "$i" -lt 30 ]; do
 done
 
 echo "Starting OAuth proxy on port ${PORT:-8080}..."
-exec node oauth-proxy.js
+exec node oauth-proxy.cjs
