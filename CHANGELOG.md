@@ -21,6 +21,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Fixed
 
+- NeoWiki subject writes now carry the `(via <tool> on MediaWiki MCP Server)` edit-summary suffix, as every other write already did. A wiki that sets `attributeEdits: false` sees no change.
 - `update-page` no longer advertises itself as idempotent: in `mode='append'` and `mode='prepend'` it never was, so a client replaying a call whose result never arrived adds the content a second time. A replace resends the same content rather than adding to it.
 - `upload-file-from-url` and `update-file-from-url` no longer leak a connection when they refuse a source URL whose declared size is over `MCP_UPLOAD_MAX_BYTES`. Each refused call held one connection open for as long as the server ran.
 - A connection failure from `wikibase-query` no longer quotes the address a redirect sent the query to. A `307` or `308` moves the query to a second address that inherits the endpoint's path, and the failure printed that address in full; it now reads as the query service, or as its host alone when it lies elsewhere. Text the query service wrote itself still reaches the caller as the service wrote it.
