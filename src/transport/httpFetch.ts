@@ -1,3 +1,4 @@
+import { Readable } from 'node:stream';
 import fetch, { Response, FetchError } from 'node-fetch';
 import { USER_AGENT } from '../runtime/constants.ts';
 import { isErrnoException } from '../errors/isErrnoException.ts';
@@ -143,6 +144,91 @@ export async function makeApiRequest<T>(
 	});
 	// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- HTTP response body; trusted JSON envelope at this boundary
 	return (await response.json()) as T;
+}
+
+/**
+ * POSTs a form-encoded body through the SSRF guard and returns the response
+ * text. For APIs that take a payload too large or too structured for a query
+ * string — notably SPARQL endpoints, whose protocol defines this encoding.
+ *
+ * `maxBytes` caps what is read into memory, refusing an over-cap body by its
+ * declared length and again by what actually arrives; without it the response is
+ * buffered whole.
+ *
+ * Throws HttpStatusError (carrying the response body, which such APIs use to
+ * explain what they rejected) on a non-2xx, FileTooLargeError over the cap, and
+ * the same reachability errors as the rest of this module otherwise.
+ */
+export async function postForm(
+	url: string,
+	form: Record<string, string>,
+	options?: { headers?: Record<string, string>; signal?: AbortSignal; maxBytes?: number },
+): Promise<string> {
+	const response = await fetchCore(url, {
+		method: 'POST',
+		body: new URLSearchParams(form).toString(),
+		headers: { ...options?.headers, 'Content-Type': 'application/x-www-form-urlencoded' },
+		signal: options?.signal,
+	});
+	if (options?.maxBytes === undefined) {
+		return await response.text();
+	}
+	return (await readCapped(response, options.maxBytes)).toString('utf8');
+}
+
+/**
+ * Reads a response body into memory under a byte cap, checked twice: the
+ * declared content-length rejects an over-cap body before a byte is read, and
+ * the running total catches one that under-declares or declares nothing.
+ *
+ * Either refusal disposes of the body first: the connection is held for as long
+ * as the body stream is neither consumed nor destroyed, so a body left unread
+ * strands a socket until something aborts the request — which, on the upload
+ * path, nothing does.
+ */
+async function readCapped(
+	response: Response,
+	maxBytes: number,
+	limitName?: string,
+): Promise<Buffer> {
+	try {
+		const declared = Number(response.headers.get('content-length'));
+		if (Number.isFinite(declared) && declared > maxBytes) {
+			throw new FileTooLargeError(declared, maxBytes, limitName);
+		}
+		const chunks: Buffer[] = [];
+		let total = 0;
+		if (response.body !== null) {
+			// node-fetch v3 exposes the body as a Node Readable (async-iterable).
+			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- node-fetch v3 body is always a Node.js Readable; narrowing to AsyncIterable<Buffer> is safe at this boundary
+			for await (const chunk of response.body as AsyncIterable<Buffer>) {
+				total += chunk.length;
+				if (total > maxBytes) {
+					throw new FileTooLargeError(total, maxBytes, limitName);
+				}
+				chunks.push(chunk);
+			}
+		}
+		return Buffer.concat(chunks);
+	} catch (error) {
+		destroyBody(response);
+		throw error;
+	}
+}
+
+/**
+ * Releases the connection behind a response body that will not be read. Leaving
+ * the read loop above destroys the stream on its way out, but a refusal that
+ * never subscribes to it has to do this itself.
+ */
+function destroyBody(response: Response): void {
+	// node-fetch v3 hands back a Node Readable, but declares it as the wider
+	// NodeJS.ReadableStream, which has no destroy(). Narrowing by instanceof
+	// rather than asserting means a body that is not a Node stream is left
+	// alone instead of throwing over the refusal being reported.
+	if (response.body instanceof Readable) {
+		response.body.destroy();
+	}
 }
 
 export async function fetchPageHtml(url: string): Promise<string | null> {
