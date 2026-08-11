@@ -27,3 +27,24 @@ af870f0b11d001e4388a289bce524e981dbcf017  # security-scan: suspiciously long lin
 # (later commits 8fc9af3 already captured an expanded version of these entries).
 # Applied as 6aec655.
 0e4f69f3d33f0d233c962f7fad320c063f637b41  applied as 6aec655 (redirect allowlist — CHANGELOG kept HEAD, superset from later cherry-picks)
+
+# --- mcp-mediawiki: security/dep bumps + functional fixes (2026-08-11) ---
+# Cherry-picked cleanly into our fork as:
+#   3c34d03 (jose 6.2.5→6.2.7), a604cb4 (ipaddr.js 2.4.0→2.5.0),
+#   0d9679f (jose 6.2.7→6.2.8), 2156882 (stop update-page creating sections),
+#   c7fdbdb (refuse section replace deleting subsections),
+#   c13c991 (stop declaring update-page idempotent)
+# SHAs differ from upstream due to rebase onto OAuth proxy commits.
+fc4fa06  applied as 3c34d03 (Bump jose 6.2.5→6.2.7)
+7264986  applied as a604cb4 (Bump ipaddr.js 2.4.0→2.5.0)
+ec59a45  applied as 0d9679f (Bump jose 6.2.7→6.2.8)
+8fa0cff  applied as 2156882 (Stop update-page creating sections)
+763a02c  applied as c7fdbdb (Refuse section replace that would delete subsections)
+ff652d8  applied as c13c991 (Stop declaring update-page idempotent)
+
+# --- mcp-mediawiki: CI/linter upstream changes (2026-08-11) ---
+# Pathfinder's CI pipeline is a full replacement of upstream's — skip these.
+ee80883  upstream CI only — add MCP protocol conformance checks to CI
+015dd25  upstream CI only — judge conformance report by exit code
+51609f1  upstream CI only — bump oxlint 1.76→1.77
+4f4fbc8  upstream CI only — bump @mcpjam/cli 3.16→3.19
