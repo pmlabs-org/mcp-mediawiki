@@ -48,3 +48,6 @@ ee80883  upstream CI only — add MCP protocol conformance checks to CI
 015dd25  upstream CI only — judge conformance report by exit code
 51609f1  upstream CI only — bump oxlint 1.76→1.77
 4f4fbc8  upstream CI only — bump @mcpjam/cli 3.16→3.19
+
+# Auto-blocked by security scanner 2026-08-26T05:10:24+00:00
+9fefe6864d9f6ccb2f2bce5b4487a632b32da47d  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
