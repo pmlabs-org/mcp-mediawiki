@@ -57,3 +57,21 @@ e0f56c76c1e47f0fb0f64f65b4d16cb37a8d8c25
 
 # 84cdbff applied manually as dfa9d13 with conflict resolution + TS compat fixes (a96f81d)
 84cdbffba95d335c56f6acae8fa0fca6a30f9274
+
+# Applied manually with conflict resolution (auto-merge diverged patch)
+# Attribute NeoWiki subject writes (#554)
+fefaffddff16eeb1a205902517838f91d31ee549
+# Send no reason at all when there is none to send (#563)
+d1a7c61e94b97c25f792811aec977b2d0e25420a
+# Measure elapsed time with a clock that cannot step (#568)
+543386a7c9c504af8e9e55924001efc64d7eafa5
+# Stop quoting the address a redirect sent the query to (#569)
+ebccebb6181ecc8241da7971f11d88bb1e2ea75d
+# Correct the release notes against the code they describe
+f7c33146539549a5a0a402cf527eb97f90b57f78
+# Bump oxlint from 1.77.0 to 1.78.0
+c48b33795c83f21038201b172268ec84d67263ab
+# Bump open from 11.0.0 to 11.0.1
+dea6807f61af30f1b112d2d417ad6d463d06de39
+# Bump @mcpjam/cli from 3.19.0 to 3.23.0
+d3cafc292f2f270c6a02408da00210877fc40bfb
