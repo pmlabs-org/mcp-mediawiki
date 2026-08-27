@@ -55,8 +55,8 @@ export class HttpStatusError extends Error {
 export class FileTooLargeError extends Error {
 	public readonly size: number;
 	public readonly limit: number;
-	public constructor(size: number, limit: number) {
-		super(`Fetched file is ${size} bytes, over the ${limit}-byte limit (MCP_UPLOAD_MAX_BYTES).`);
+	public constructor(size: number, limit: number, limitName?: string) {
+		super();
 		this.name = 'FileTooLargeError';
 		this.size = size;
 		this.limit = limit;
@@ -69,6 +69,7 @@ async function fetchCore(
 		params?: Record<string, string>;
 		headers?: Record<string, string>;
 		method?: string;
+		body?: string;
 		signal?: AbortSignal;
 	},
 ): Promise<Response> {
@@ -104,6 +105,7 @@ async function fetchCore(
 			redirect: 'manual',
 			agent,
 			signal: options?.signal,
+			body: options?.body,
 		});
 
 		if (response.status < 300 || response.status >= 400) {
