@@ -51,3 +51,6 @@ ee80883  upstream CI only — add MCP protocol conformance checks to CI
 
 # Auto-blocked by security scanner 2026-08-26T05:10:24+00:00
 9fefe6864d9f6ccb2f2bce5b4487a632b32da47d  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
+
+# e0f56c7 applied manually as ec63c0a with conflict resolution (httpFetch.ts)
+e0f56c76c1e47f0fb0f64f65b4d16cb37a8d8c25
