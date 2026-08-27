@@ -54,3 +54,6 @@ ee80883  upstream CI only — add MCP protocol conformance checks to CI
 
 # e0f56c7 applied manually as ec63c0a with conflict resolution (httpFetch.ts)
 e0f56c76c1e47f0fb0f64f65b4d16cb37a8d8c25
+
+# 84cdbff applied manually as dfa9d13 with conflict resolution + TS compat fixes (a96f81d)
+84cdbffba95d335c56f6acae8fa0fca6a30f9274
