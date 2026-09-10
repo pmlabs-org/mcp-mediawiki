@@ -5,6 +5,62 @@ import { searchPage } from '../../src/tools/search-page.ts';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
 import type { SiteInfo } from '../../src/wikis/siteInfoCache.ts';
+import { toolArgs } from '../helpers/toolArgs.ts';
+
+type SearchRow = {
+	ns: number;
+	title: string;
+	pageid: number;
+	size: number;
+	snippet: string;
+	timestamp: string;
+};
+
+function searchRow(overrides: Partial<SearchRow> = {}): SearchRow {
+	return {
+		ns: 0,
+		title: 'Test Page',
+		pageid: 1,
+		size: 1,
+		snippet: 's',
+		timestamp: '2026-01-01T00:00:00Z',
+		...overrides,
+	};
+}
+
+function mockSearchReturning(search: SearchRow[], warning?: string) {
+	return createMockMwn({
+		request: vi.fn().mockResolvedValue({
+			query: { search },
+			...(warning !== undefined ? { warnings: { search: { warnings: warning } } } : {}),
+		}),
+	});
+}
+
+// Returns the scope notice alone. Asserting against the whole payload would
+// let a result row satisfy an assertion the notice was supposed to carry.
+function scopeNotice(text: string): string {
+	const marker = 'Scope notice:';
+	expect(text).toContain(marker);
+	// The formatter renders a short value inline and a long one as its own
+	// block, so skip any leading newlines before taking the notice's one line.
+	return text
+		.slice(text.indexOf(marker) + marker.length)
+		.replace(/^\n+/, '')
+		.split('\n')[0]
+		.trim();
+}
+
+// The search call is located by its own list parameter rather than by call
+// index, so a test stays honest if the handler ever issues another request
+// first.
+function searchParams(mock: ReturnType<typeof createMockMwn>): Record<string, unknown> {
+	const call = mock.request.mock.calls.find(
+		(args: unknown[]) => (args[0] as Record<string, unknown>).list === 'search',
+	);
+	expect(call).toBeDefined();
+	return call![0] as Record<string, unknown>;
+}
 
 // fakeContext seeds a siteinfo cache with no content namespaces, so every test
 // that does not call this exercises the unresolved path and proves nothing
@@ -221,7 +277,7 @@ describe('search-page', () => {
 		expect(searchParams(mock).srwhat).toBe('text');
 	});
 
-	it('falls back to the wiki default when siteinfo reports no content namespaces', async () => {
+	it('omits srnamespace when the caller names no namespaces', async () => {
 		const mock = mockSearchReturning([]);
 		const ctx = fakeContext({ mwn: async () => mock as never });
 
@@ -301,97 +357,12 @@ describe('search-page', () => {
 
 	it('omits the scope notice when the caller named no namespaces', async () => {
 		const mock = mockSearchReturning([searchRow({ title: 'Help:Contents', ns: 12 })]);
-		const ctx = contextKnowing(mock, [0, 12]);
+		const ctx = fakeContext({ mwn: async () => mock as never });
 
 		const result = await searchPage.handle(toolArgs(searchPage, { query: 'Help:Contents' }), ctx);
 
 		const text = assertStructuredSuccess(result);
 		expect(text).toContain('- Title: Help:Contents');
-		expect(text).not.toContain('Scope notice:');
-	});
-
-	it('searches the wiki content namespaces when the caller names none', async () => {
-		const mock = mockSearchReturning([]);
-		const ctx = contextKnowing(mock, [0, 100, 102]);
-
-		await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		expect(searchParams(mock).srnamespace).toBe('0|100|102');
-	});
-
-	it('prefers the namespaces the caller named over the wiki content namespaces', async () => {
-		const mock = mockSearchReturning([]);
-		const ctx = contextKnowing(mock, [0, 100, 102]);
-
-		await searchPage.handle(toolArgs(searchPage, { query: 'test', namespaces: [12] }), ctx);
-
-		expect(searchParams(mock).srnamespace).toBe('12');
-	});
-
-	it('never sends an empty srnamespace, which would search the whole wiki', async () => {
-		const mock = mockSearchReturning([]);
-		const ctx = contextKnowing(mock, []);
-
-		await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		const params = searchParams(mock);
-		expect(params.srsearch).toBe('test');
-		expect(params).not.toHaveProperty('srnamespace');
-	});
-
-	it('caps the wiki scope at the fifty values the search API accepts', async () => {
-		const mock = mockSearchReturning([]);
-		const ctx = contextKnowing(
-			mock,
-			Array.from({ length: 60 }, (_, i) => i * 2),
-		);
-
-		const result = await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		expect(String(searchParams(mock).srnamespace).split('|')).toHaveLength(50);
-		expect(scopeNotice(assertStructuredSuccess(result))).toContain('50');
-	});
-
-	it('does not blame the caller for namespaces the wiki default reached', async () => {
-		const mock = mockSearchReturning([searchRow({ title: 'Help:Contents', ns: 12 })]);
-		const ctx = contextKnowing(mock, [0, 100]);
-
-		const result = await searchPage.handle(toolArgs(searchPage, { query: 'Help:Contents' }), ctx);
-
-		const text = assertStructuredSuccess(result);
-		expect(text).toContain('- Title: Help:Contents');
-		expect(text).not.toContain('Scope notice:');
-	});
-
-	it('reports a wiki warning even when the scope came from the wiki', async () => {
-		const mock = mockSearchReturning(
-			[searchRow({ ns: 0 })],
-			'Unrecognized value for parameter "srnamespace": 999',
-		);
-		const ctx = contextKnowing(mock, [0, 999]);
-
-		const result = await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		expect(scopeNotice(assertStructuredSuccess(result))).toContain('999');
-	});
-
-	it('explains an empty result the wiki namespaces could not be read for', async () => {
-		const mock = mockSearchReturning([]);
-		const ctx = contextKnowing(mock, []);
-
-		const result = await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		expect(scopeNotice(assertStructuredSuccess(result))).toContain('main namespace');
-	});
-
-	it('stays quiet about an unread namespace list when the search found something', async () => {
-		const mock = mockSearchReturning([searchRow({ ns: 0 })]);
-		const ctx = contextKnowing(mock, []);
-
-		const result = await searchPage.handle(toolArgs(searchPage, { query: 'test' }), ctx);
-
-		const text = assertStructuredSuccess(result);
-		expect(text).toContain('- Title: Test Page');
 		expect(text).not.toContain('Scope notice:');
 	});
 });

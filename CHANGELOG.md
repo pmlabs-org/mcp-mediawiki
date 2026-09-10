@@ -8,9 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ### Added
 
-- `search-page` accepts `namespaces` to name the namespace IDs to search, and each result now reports the namespace it came from; `get-site-info` lists a wiki's namespace IDs. When the namespaces searched are not the ones asked for — the wiki refused an ID, or a namespace prefix in the query overrode them — the response now says so.
-- `update-page` can now rewrite one passage of a page without resending the rest: `operation='find-replace'` takes `find`, the existing wikitext to change, and `replaceWith`, what it becomes. The server holds the page and applies the change, so a large page no longer has to travel to or from the caller to be edited. `find` is matched in full and exactly; one that matches nothing, or more than one place, is refused without writing.
-- `update-page` takes an `operation` argument naming what the write does — `replace`, `append`, `prepend` or `find-replace` — where the choice was previously inferred from which other arguments were present. `section` now reads as the scope of the write rather than as a mode of its own: `operation` says what, `section` says where.
+- `search-page` accepts `namespaces` to name the namespace IDs to search, and each result now reports the namespace it came from. A call that omits `namespaces` searches the main namespace, which was always the case but went unstated; `get-site-info` lists a wiki's namespace IDs. When the namespaces searched are not the ones asked for — the wiki refused an ID, or a namespace prefix in the query overrode them — the response now says so.
 
 ### Changed
 
@@ -22,8 +20,6 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 ### Fixed
 
 - Passing more namespace IDs than the wiki accepts (50, unless the account holds `apihighlimits`) is now reported as invalid input rather than as an upstream failure. This affects `get-category-members`, `get-links-here`, `get-recent-changes` and `search-page`.
-- A truncated page or section read no longer ends mid-character. The cut now falls on a character boundary, so what comes back is exactly what the page holds: a multi-byte character split by the cut previously arrived as a replacement character that was never on the page, and the response could exceed the byte cap it reported against.
-- A truncated read no longer offers a narrowing that returns the same bytes. A `section=N` read names that section's own subsections, and a read with nothing narrower left says so instead of repeating the call that had just truncated.
 - A wiki that stops answering no longer hangs a tool call for minutes. This covers the first call to a wiki, where connecting and signing in were previously unbounded. A timed-out write reports that the change may or may not have been applied, since the server cannot tell.
 - `add-wiki` no longer hangs on a URL whose host accepts the connection and then goes quiet. It now gives up after 30 seconds and reports a timeout, instead of suggesting the URL may be wrong.
 
