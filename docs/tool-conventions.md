@@ -161,6 +161,10 @@ A successful result carries its payload twice: as prose in `content[0]` and as J
 
 A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
 
+#### Response channels
+
+A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
+
 #### Default-value omission in list responses
 
 List tools omit fields whose value is the type default rather than serialising them: a boolean flag is present only when `true` (absent means `false`), empty strings and empty arrays are dropped, and a value equal to a documented common default is omitted (e.g. a category member's `type` is absent for an ordinary page). Every non-default value is preserved; field names are unchanged. State the convention in each affected tool's description so callers know absence means the default.
