@@ -94,3 +94,6 @@ f3f2946bf4df66d400f66b2834a7f737817acc00  # verified false positive: long CHANGE
 d29d8b4d0f4f83ca9468a9dc6ea1e03960dfc417  # verified false positive: long CHANGELOG.md line -- Correct the cap policy number marker and remedies
 2b8dc5f48ed00a4af7c7f58789ea31dad45d9a18  # verified false positive: long CHANGELOG.md line -- Refuse the two writes that delete content the caller never read
 757208e9b5ef2a19d73d8a1cf9a8debd88704447  # verified false positive: long CHANGELOG.md line -- Correct the release notes before tagging 0.18.0
+
+# f523ff0 applied manually as 4985be1 with conflict resolution (modify/delete: mcp-checks files)
+f523ff0dc03dcb4be196ed6cad3d52d62499e809
