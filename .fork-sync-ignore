@@ -97,3 +97,6 @@ d29d8b4d0f4f83ca9468a9dc6ea1e03960dfc417  # verified false positive: long CHANGE
 
 # f523ff0 applied manually as 4985be1 with conflict resolution (modify/delete: mcp-checks files)
 f523ff0dc03dcb4be196ed6cad3d52d62499e809
+
+# 3b3a4ac applied manually as a1b838e with conflict resolution (Bump @mcpjam/cli 3.29.0 to 5.6.0 (package-lock conflict resolved))
+3b3a4aceebf06fc1bc759fe0c9ef944501f26f13
