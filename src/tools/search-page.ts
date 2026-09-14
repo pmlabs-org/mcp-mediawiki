@@ -4,7 +4,6 @@ import type { ApiResponse, ApiSearchResult } from 'mwn';
 import type { Tool } from '../runtime/tool.ts';
 import type { ToolContext } from '../runtime/context.ts';
 import { buildPageUrl } from '../wikis/utils.ts';
-import { resolveSiteInfo } from '../wikis/siteInfo.ts';
 import type { TruncationInfo } from '../results/truncation.ts';
 
 const inputSchema = {
@@ -40,7 +39,6 @@ export const searchPage: Tool<typeof inputSchema> = {
 
 	async handle({ query, limit, namespaces }, ctx: ToolContext): Promise<CallToolResult> {
 		const mwn = await ctx.mwn();
-		const scope = await resolveScope(ctx, namespaces);
 
 		const params: Record<string, string | number | boolean> = {
 			action: 'query',
