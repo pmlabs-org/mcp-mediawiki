@@ -65,6 +65,7 @@ function searchParams(mock: ReturnType<typeof createMockMwn>): Record<string, un
 // fakeContext seeds a siteinfo cache with no content namespaces, so every test
 // that does not call this exercises the unresolved path and proves nothing
 // about the wiki-derived default.
+// oxlint-disable-next-line no-unused-vars
 function contextKnowing(mock: ReturnType<typeof createMockMwn>, contentNamespaces: number[]) {
 	const ctx = fakeContext({ mwn: async () => mock as never });
 	ctx.siteInfoCache.set('test-wiki', {

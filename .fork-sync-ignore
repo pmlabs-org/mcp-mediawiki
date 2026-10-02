@@ -100,3 +100,5 @@ f523ff0dc03dcb4be196ed6cad3d52d62499e809
 
 # 3b3a4ac applied manually as a1b838e with conflict resolution (Bump @mcpjam/cli 3.29.0 to 5.6.0 (package-lock conflict resolved))
 3b3a4aceebf06fc1bc759fe0c9ef944501f26f13
+66632aa
+d2cceaf  # Bump vitest 4.1.11 to 5.0.0 -- skipped due to pre-commit hook failure, 5.0.1 applied later
