@@ -1,36 +1,30 @@
-import { USER_AGENT } from '../runtime/constants.js';
-import { wikiService } from './wikiService.js';
+import { USER_AGENT } from '../runtime/constants.ts';
+import { wikiService } from './wikiService.ts';
 import { Mwn, MwnOptions } from 'mwn';
 
 let mwnInstance: Mwn | null = null;
 
 export async function getMwn(): Promise<Mwn> {
-	if ( mwnInstance ) {
+	if (mwnInstance) {
 		return mwnInstance;
 	}
 
-	const {
-		server,
-		scriptpath,
-		token,
-		username,
-		password
-	} = wikiService.getCurrent().config;
+	const { server, scriptpath, token, username, password } = wikiService.getCurrent().config;
 
 	const options: MwnOptions = {
-		apiUrl: `${ server }${ scriptpath }/api.php`,
-		userAgent: USER_AGENT
+		apiUrl: `${server}${scriptpath}/api.php`,
+		userAgent: USER_AGENT,
 	};
 
-	if ( token ) {
+	if (token) {
 		options.OAuth2AccessToken = token;
-		mwnInstance = await Mwn.init( options );
-	} else if ( username && password ) {
+		mwnInstance = await Mwn.init(options);
+	} else if (username && password) {
 		options.username = username;
 		options.password = password;
-		mwnInstance = await Mwn.init( options );
+		mwnInstance = await Mwn.init(options);
 	} else {
-		mwnInstance = new Mwn( options );
+		mwnInstance = new Mwn(options);
 		await mwnInstance.getSiteInfo();
 	}
 

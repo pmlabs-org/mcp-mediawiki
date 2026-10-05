@@ -76,6 +76,7 @@ function proxy(req, res, bodyBuf) {
   proxyReq.end();
 }
 
+// oxlint-disable-next-line typescript/no-misused-promises
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, "http://localhost:" + PORT);
   const path = url.pathname;
