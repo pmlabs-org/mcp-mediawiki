@@ -104,3 +104,6 @@ f523ff0dc03dcb4be196ed6cad3d52d62499e809
 d2cceaf  # Bump vitest 4.1.11 to 5.0.0 -- skipped due to pre-commit hook failure, 5.0.1 applied later
 914020a
 914020a
+
+# 86f71660 — Dockerfile HEALTHCHECK PORT fix already applied in our fork; conflict is CHANGELOG.md only
+86f716601c9eb02219d9e95d44b2bae1102580fb
