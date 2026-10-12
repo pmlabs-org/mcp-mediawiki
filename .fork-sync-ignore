@@ -110,3 +110,6 @@ d2cceaf  # Bump vitest 4.1.11 to 5.0.0 -- skipped due to pre-commit hook failure
 
 # b8050299 — dependabot vitest 5.0.1→5.0.3 package-lock.json bump; conflicts with fork's lock state
 b80502990cce90cdd85e34cc16d9c27afb314a1d
+
+# 73c40228 — dependabot @mcpjam/cli 5.7.1→5.12.2 package-lock.json bump; conflicts with fork's lock state
+73c402286cb9fb030a771b982c1f077cdf13d350
