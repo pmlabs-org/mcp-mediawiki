@@ -107,3 +107,6 @@ d2cceaf  # Bump vitest 4.1.11 to 5.0.0 -- skipped due to pre-commit hook failure
 
 # 86f71660 — Dockerfile HEALTHCHECK PORT fix already applied in our fork; conflict is CHANGELOG.md only
 86f716601c9eb02219d9e95d44b2bae1102580fb
+
+# b8050299 — dependabot vitest 5.0.1→5.0.3 package-lock.json bump; conflicts with fork's lock state
+b80502990cce90cdd85e34cc16d9c27afb314a1d
