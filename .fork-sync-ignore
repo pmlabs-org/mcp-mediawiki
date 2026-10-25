@@ -113,3 +113,6 @@ b80502990cce90cdd85e34cc16d9c27afb314a1d
 
 # 73c40228 — dependabot @mcpjam/cli 5.7.1→5.12.2 package-lock.json bump; conflicts with fork's lock state
 73c402286cb9fb030a771b982c1f077cdf13d350
+
+# Auto-blocked by security scanner 2026-10-25T17:00:16+00:00
+bca2f82b69013eb40873238281570334bf4d9b1c  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
