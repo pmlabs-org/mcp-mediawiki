@@ -131,3 +131,6 @@ a40522adbffccd6401e10ff9bc09b06cd7a68d8f  # security-scan: suspiciously long lin
 
 # 370970f — dependabot @mcpjam/cli 5.12.2→5.15.0 package-lock.json bump; conflicts with fork's lock state
 370970fd50fb6ead1ae34eda334c4da797cfcf55
+
+# Auto-blocked by security scanner 2026-11-08T17:00:24+00:00
+1037692e049f88d1e070b9d6fb7e9d7931c001e3  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
