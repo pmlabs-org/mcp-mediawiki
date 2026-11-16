@@ -146,3 +146,10 @@ eb35881e44a56772deee0ce65fecca893f21e9f4  # security-scan: suspiciously long lin
 
 # Auto-blocked by security scanner 2026-11-08T17:07:44+00:00
 6261d61e9d863c18f7300e2952c09df51cd23ea1  # security-scan: suspiciously long line (>300 chars, possible obfuscation)
+
+# 79b0fc5 - build page URLs for query-string article paths (#667), 2026-11-17 (Trello 7MfteNnC fork-conflict review).
+# Only matters for wikis whose articlepath is /index.php?title=$1. Our single wiki
+# (wiki.pathfindermarketing.com.au) is path-style (/$1), so no benefit; it also overlaps our
+# customised wikis code (siteInfo.ts, utils.ts, wikiDiscovery.ts, wikiProbe.ts) and changes
+# URL encoding for path-style titles. Revisit if we ever add a query-string-path wiki.
+79b0fc507970e529d6b3fd0332f767c8f7f6f0ed
