@@ -10,8 +10,20 @@ export type ErrorCategory =
 	| 'rate_limited'
 	| 'authentication';
 
-export interface ErrorClassifier {
-	classify(err: unknown): { category: ErrorCategory; code?: string };
+/**
+ * A failure its pack already classified, from a transport of the pack's own
+ * rather than mwn. Thrown like any other failure, so the caller and the logs
+ * see it the way they see every tool's.
+ */
+export class ClassifiedError extends Error {
+	public constructor(
+		public readonly category: ErrorCategory,
+		message: string,
+		public readonly upstreamStatus?: number,
+	) {
+		super(message);
+		this.name = 'ClassifiedError';
+	}
 }
 
 const MW_CODE_TO_CATEGORY: Record<string, ErrorCategory> = {
@@ -112,10 +124,22 @@ export interface ExtensionErrorVocabulary {
 
 const NO_EXTENSION_CODES: ExtensionErrorVocabulary = { codes: {}, prefixes: [] };
 
+// Own keys only: a code that names an Object.prototype member, such as
+// `constructor`, would otherwise read as a category.
+function categoryOf(
+	vocabulary: Readonly<Record<string, ErrorCategory>>,
+	code: string,
+): ErrorCategory | undefined {
+	return Object.hasOwn(vocabulary, code) ? vocabulary[code] : undefined;
+}
+
 export function classifyError(
 	err: unknown,
 	extensions: ExtensionErrorVocabulary = NO_EXTENSION_CODES,
 ): { category: ErrorCategory; code?: string } {
+	if (err instanceof ClassifiedError) {
+		return { category: err.category };
+	}
 	if (err instanceof CredentialResolutionError) {
 		return { category: 'authentication' };
 	}
@@ -129,7 +153,7 @@ export function classifyError(
 		if (typeof code === 'string') {
 			// Core first: a pack cannot reinterpret a code the wiki already defines,
 			// and registration rejects an overlap before it could try.
-			const mapped = MW_CODE_TO_CATEGORY[code] ?? extensions.codes[code];
+			const mapped = categoryOf(MW_CODE_TO_CATEGORY, code) ?? categoryOf(extensions.codes, code);
 			if (mapped) {
 				return { category: mapped, code };
 			}
@@ -154,8 +178,8 @@ export function classifyError(
 	return { category: 'upstream_failure' };
 }
 
-export class ErrorClassifierImpl implements ErrorClassifier {
-	public constructor(private readonly extensions: ExtensionErrorVocabulary = NO_EXTENSION_CODES) {}
+export class ErrorClassifier {
+	public constructor(private readonly extensions: ExtensionErrorVocabulary) {}
 
 	public classify(err: unknown): { category: ErrorCategory; code?: string } {
 		return classifyError(err, this.extensions);

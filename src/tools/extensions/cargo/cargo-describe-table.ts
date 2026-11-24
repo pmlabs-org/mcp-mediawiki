@@ -2,6 +2,13 @@ import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { Tool } from '../../../runtime/tool.ts';
 import type { ToolContext } from '../../../runtime/context.ts';
+import type { TailoredError } from '../../../errors/tailoredErrors.ts';
+import { cargoRefusal } from './cargoRefusal.ts';
+
+const TABLE_NOT_FOUND: TailoredError = {
+	category: 'invalid_input',
+	message: 'Table not found. Use cargo-list-tables to see available table names.',
+};
 
 const inputSchema = {
 	table: z.string().min(1).describe('Cargo table name. Use cargo-list-tables to discover.'),
@@ -37,6 +44,11 @@ export const cargoDescribeTable: Tool<typeof inputSchema> = {
 		openWorldHint: true,
 	},
 	failureVerb: 'describe Cargo table',
+	tailoredErrors: {
+		internal_api_error_MWException: () => TABLE_NOT_FOUND,
+		db_error: (message) =>
+			cargoRefusal(message)?.includes('not found') === true ? TABLE_NOT_FOUND : undefined,
+	},
 	target: (a) => a.table,
 
 	async handle({ table }, ctx: ToolContext): Promise<CallToolResult> {

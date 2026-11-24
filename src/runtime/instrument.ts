@@ -1,9 +1,9 @@
 import { createHash } from 'node:crypto';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { emitTelemetryEvent } from './logger.ts';
-import { recordToolCall } from './metrics.ts';
+import type { Metrics } from './metrics.ts';
 import { monotonicNow } from './clock.ts';
-import type { ErrorCategory } from '../errors/classifyError.ts';
+import { ClassifiedError, type ErrorCategory } from '../errors/classifyError.ts';
 
 // `cancelled` sits alongside ErrorCategory rather than inside it: the caller
 // walked away, which is not a fault to classify or to shape into a response.
@@ -87,6 +87,9 @@ export function detectTruncation(result: CallToolResult): boolean {
 }
 
 export function extractUpstreamStatus(err: unknown): number | undefined {
+	if (err instanceof ClassifiedError) {
+		return err.upstreamStatus;
+	}
 	if (err !== null && typeof err === 'object') {
 		const response = (err as { response?: { status?: unknown } }).response;
 		if (response && typeof response.status === 'number') {
@@ -119,11 +122,11 @@ export interface EmitToolCallOptions<TArgs> {
 	readonly outcome: ToolOutcome;
 	readonly upstreamStatus: number | undefined;
 	readonly errorMessage: string | undefined;
-	readonly runtimeToken: string | undefined;
+	readonly caller: string;
 	readonly wikiKey: string;
 }
 
-export function emitToolCall<TArgs>(opts: EmitToolCallOptions<TArgs>): void {
+export function emitToolCall<TArgs>(metrics: Metrics, opts: EmitToolCallOptions<TArgs>): void {
 	const level = levelFor(opts.outcome);
 	const targetValue = safeTarget(opts.target, opts.args);
 	const truncated = opts.outcome === 'success' ? detectTruncation(opts.result) : false;
@@ -135,7 +138,7 @@ export function emitToolCall<TArgs>(opts: EmitToolCallOptions<TArgs>): void {
 		wiki: opts.wikiKey,
 		outcome: opts.outcome,
 		duration_ms: durationMs,
-		caller: hashCaller(opts.runtimeToken),
+		caller: opts.caller,
 		truncated,
 	};
 	if (targetValue !== '') {
@@ -153,7 +156,7 @@ export function emitToolCall<TArgs>(opts: EmitToolCallOptions<TArgs>): void {
 	// metrics path would propagate up and fail the call. The stderr line
 	// above has already flushed, so we still have an operator-visible record.
 	try {
-		recordToolCall({
+		metrics.recordToolCall({
 			tool: opts.toolName,
 			wiki: opts.wikiKey,
 			outcome: opts.outcome,

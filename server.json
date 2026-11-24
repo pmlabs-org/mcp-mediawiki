@@ -3,7 +3,7 @@
   "name": "io.github.ProfessionalWiki/mediawiki-mcp-server",
   "title": "MediaWiki MCP Server",
   "description": "MCP server enabling AI clients to interact with any MediaWiki wiki through standard tools",
-  "version": "0.19.0",
+  "version": "0.21.0",
   "repository": {
     "url": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server",
     "source": "github"
@@ -11,8 +11,8 @@
   "packages": [
     {
       "registryType": "mcpb",
-      "identifier": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases/download/v0.19.0/MediaWiki-MCP-Server.mcpb",
-      "fileSha256": "850230cbaa90fd896c6a6271c05152a82a47d6ca070abaca9c438490ef4e23f3",
+      "identifier": "https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/releases/download/v0.21.0/MediaWiki-MCP-Server.mcpb",
+      "fileSha256": "150a3600d0aa83168bfad696460d694d75278cc5f928abbcf524680b6528efc6",
       "transport": {
         "type": "stdio"
       },
@@ -126,7 +126,7 @@
     {
       "registryType": "npm",
       "identifier": "@professional-wiki/mediawiki-mcp-server",
-      "version": "0.19.0",
+      "version": "0.21.0",
       "runtimeHint": "npx",
       "transport": {
         "type": "stdio"

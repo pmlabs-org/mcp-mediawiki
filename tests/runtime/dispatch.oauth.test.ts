@@ -3,17 +3,19 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import type { Tool } from '../../src/runtime/tool.ts';
-import { fakeContext, ctxForWiki } from '../helpers/fakeContext.ts';
+import type { SharedContext } from '../../src/runtime/context.ts';
+import { listWikis } from '../../src/tools/list-wikis.ts';
+import { fakeContext, ctxForWiki, ctxForWikis } from '../helpers/fakeContext.ts';
 import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 import { fakeBrowserDriver } from '../helpers/fakeBrowserDriver.ts';
 import { useTempTokenStore } from '../helpers/tempTokenStore.ts';
-import { getRequestWiki, getRuntimeToken } from '../../src/runtime/requestContext.ts';
+import { createTokenStore } from '../../src/auth/tokenStore.ts';
+import { getRuntimeToken } from '../../src/runtime/requestContext.ts';
 import { _resetMetadataCacheForTesting } from '../../src/auth/metadata.ts';
-import { _resetBrowserAuthDedupForTesting } from '../../src/auth/browserAuth.ts';
-import { _resetRefreshDedupForTesting } from '../../src/auth/tokenRefresh.ts';
 
 vi.mock('open', () => ({ default: vi.fn() }));
 import openMod from 'open';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
 
 useTempTokenStore();
 
@@ -22,24 +24,22 @@ let fakeAs: FakeAsHandle;
 afterEach(async () => {
 	await fakeAs?.close();
 	_resetMetadataCacheForTesting();
-	_resetBrowserAuthDedupForTesting();
-	_resetRefreshDedupForTesting();
 	vi.clearAllMocks();
 });
 
-/** A dummy tool that returns whatever getRuntimeToken() sees at invocation time. */
+/** A dummy tool that returns the token its call may send to the wiki it resolved. */
 const tokenCaptureTool: Tool<Record<string, never>> = {
 	name: 'dummy',
 	description: 'd',
 	inputSchema: {},
 	annotations: { readOnlyHint: true },
-	async handle(): Promise<CallToolResult> {
-		return { content: [{ type: 'text', text: getRuntimeToken() ?? '' }] };
+	async handle(_args, ctx): Promise<CallToolResult> {
+		return { content: [{ type: 'text', text: getRuntimeToken(ctx.wiki.key) ?? '' }] };
 	},
 };
 
 describe('dispatch OAuth integration', () => {
-	it('stdio + oauth2ClientId: binds token and tool sees getRuntimeToken()', async () => {
+	it('stdio + oauth2ClientId: acquires a token and the tool runs with it', async () => {
 		fakeAs = await startFakeAs();
 		vi.mocked(openMod).mockImplementation(
 			fakeBrowserDriver(fakeAs.url, 'consent') as typeof openMod,
@@ -62,62 +62,70 @@ describe('dispatch OAuth integration', () => {
 		expect(text).toMatch(/^access-CODE-/);
 	});
 
-	it('stdio + oauth2ClientId: resolved wikiKey survives into the token-scoped run', async () => {
+	it('stdio + oauth2ClientId: binds the token to the wiki it was acquired for', async () => {
 		fakeAs = await startFakeAs();
 		vi.mocked(openMod).mockImplementation(
 			fakeBrowserDriver(fakeAs.url, 'consent') as typeof openMod,
 		);
-
-		const ctx = ctxForWiki(
+		// The OAuth wiki is not the default, so a token bound to the default would show.
+		const ctx = ctxForWikis(
 			{
-				sitename: 'Test',
-				server: fakeAs.url,
-				articlepath: '/wiki',
-				scriptpath: '/w',
-				oauth2ClientId: 'my-client',
-			} as never,
+				home: {
+					sitename: 'Home',
+					server: 'https://home.example',
+					articlepath: '/wiki',
+					scriptpath: '/w',
+				},
+				'wiki-key': {
+					sitename: 'Test',
+					server: fakeAs.url,
+					articlepath: '/wiki',
+					scriptpath: '/w',
+					oauth2ClientId: 'my-client',
+				},
+			},
+			'home',
 			'stdio',
 		);
-
-		// Wiki-scoped tool (no `wikiScoped: false`): the dispatcher resolves the
-		// per-call wiki and the OAuth gate nests the token scope inside it.
-		let observedWiki: string | undefined;
-		const wikiCaptureTool: Tool<Record<string, never>> = {
-			name: 'wiki-capture',
+		const seen: { oauthWiki?: string; defaultWiki?: string } = {};
+		const captureTool: Tool<Record<string, never>> = {
+			name: 'binding-capture',
 			description: 'd',
 			inputSchema: {},
 			annotations: { readOnlyHint: true },
 			async handle(): Promise<CallToolResult> {
-				observedWiki = getRequestWiki();
-				return { content: [{ type: 'text', text: getRequestWiki() ?? '' }] };
+				seen.oauthWiki = getRuntimeToken('wiki-key');
+				seen.defaultWiki = getRuntimeToken('home');
+				return { content: [{ type: 'text', text: 'ran' }] };
 			},
 		};
 
-		// Pass the OAuth wiki explicitly via the `wiki` arg.
-		const result = await dispatch(wikiCaptureTool, ctx)({ wiki: 'wiki-key' } as never);
-		expect(result.isError).toBeUndefined();
-		// The resolved wikiKey set by the wiki scope survives into the
-		// token-scoped run nested inside it.
-		expect(observedWiki).toBe('wiki-key');
+		await dispatch(captureTool, ctx)({ wiki: 'wiki-key' } as never);
+
+		expect(seen.oauthWiki).toMatch(/^access-CODE-/);
+		expect(seen.defaultWiki).toBeUndefined();
+		const stored = (await createTokenStore().read()).tokens;
+		expect(stored['wiki-key']).toBeDefined();
+		expect(stored.home).toBeUndefined();
 	});
 
-	it('stdio without oauth2ClientId: does not call acquireToken / open', async () => {
+	it('stdio without oauth2ClientId: does not sign in or open a browser', async () => {
 		fakeAs = await startFakeAs();
 
 		const ctx = fakeContext({
-			transport: 'stdio',
-			// default fakeContext activeWiki has no oauth2ClientId
+			auth: fakeAuthPolicy({ transport: 'stdio' }),
+			// the default fakeContext wiki has no oauth2ClientId
 		});
 
 		const result = await dispatch(tokenCaptureTool, ctx)({});
 		expect(result.isError).toBeUndefined();
-		// No token bound — getRuntimeToken() returns undefined
+		// No token acquired, so the call holds none
 		const text = (result.content[0] as { text: string }).text;
 		expect(text).toBe('');
 		expect(vi.mocked(openMod)).not.toHaveBeenCalled();
 	});
 
-	it('http + oauth2ClientId with no token: capability guard rejects, no acquireToken / open', async () => {
+	it('http + oauth2ClientId with no token: capability guard rejects, no sign-in or browser', async () => {
 		fakeAs = await startFakeAs();
 		vi.mocked(openMod).mockImplementation(
 			fakeBrowserDriver(fakeAs.url, 'consent') as typeof openMod,
@@ -143,8 +151,8 @@ describe('dispatch OAuth integration', () => {
 		expect(vi.mocked(openMod)).not.toHaveBeenCalled();
 	});
 
-	it('acquireToken failure: tool is NOT invoked; returns authentication error', async () => {
-		// Point server at a non-existent URL so acquireToken's metadata fetch fails.
+	it('sign-in failure: tool is NOT invoked; returns authentication error', async () => {
+		// Point server at a non-existent URL so the sign-in's metadata fetch fails.
 		const ctx = ctxForWiki(
 			{
 				sitename: 'Broken',
@@ -179,13 +187,11 @@ describe('dispatch OAuth integration', () => {
 		expect(envelope.message).toContain('OAuth login required:');
 	});
 
-	it.each(['add-wiki', 'remove-wiki', 'oauth-status', 'oauth-logout'])(
-		'%s bypasses the OAuth gate even when the wiki has oauth2ClientId set',
-		async (toolName) => {
-			// Wiki points at a URL where nothing is listening — so if the dispatcher
-			// tried to acquire a token, it would fail with "authentication" just like
-			// the previous test. The bypass means the tool runs anyway.
-			const ctx = ctxForWiki(
+	describe('a wiki whose OAuth sign-in cannot complete', () => {
+		// Nothing listens at this server, so a sign-in attempt fails with an
+		// authentication error, as in the previous test.
+		const unreachableOauthWiki = (): ReturnType<typeof ctxForWiki> =>
+			ctxForWiki(
 				{
 					sitename: 'OAuth-Configured',
 					server: 'http://127.0.0.1:1',
@@ -196,25 +202,29 @@ describe('dispatch OAuth integration', () => {
 				'stdio',
 			);
 
-			let toolInvoked = false;
-			const bypassTool: Tool<Record<string, never>> = {
-				name: toolName,
+		it('runs a tool that is not wiki-scoped without OAuth sign-in', async () => {
+			const serverLocalTool: Tool<Record<string, never>, SharedContext> = {
+				name: 'server-local',
 				description: 'd',
 				inputSchema: {},
 				annotations: { readOnlyHint: true },
-				// add-wiki / remove-wiki / oauth-* are not wiki-scoped, so they skip
-				// per-call wiki resolution entirely.
 				wikiScoped: false,
 				async handle(): Promise<CallToolResult> {
-					toolInvoked = true;
 					return { content: [{ type: 'text', text: 'ran' }] };
 				},
 			};
 
-			const result = await dispatch(bypassTool, ctx)({});
-			expect(toolInvoked).toBe(true);
+			const result = await dispatch(serverLocalTool, unreachableOauthWiki())({});
+
 			expect(result.isError).toBeUndefined();
 			expect((result.content[0] as { text: string }).text).toBe('ran');
-		},
-	);
+		});
+
+		it('runs list-wikis without OAuth sign-in', async () => {
+			const result = await dispatch(listWikis, unreachableOauthWiki())({});
+
+			expect(result.isError).toBeUndefined();
+			expect(JSON.stringify(result.structuredContent)).toContain('wiki-key');
+		});
+	});
 });

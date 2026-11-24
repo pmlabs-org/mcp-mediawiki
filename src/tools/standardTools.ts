@@ -15,6 +15,7 @@ import { getRevision } from './get-revision.ts';
 import { getSiteInfo } from './get-site-info.ts';
 import { getCategoryMembers } from './get-category-members.ts';
 import { getLinksHere } from './get-links-here.ts';
+import { getRandomPages } from './get-random-pages.ts';
 import { listWikis } from './list-wikis.ts';
 import { whoami } from './whoami.ts';
 import { createPage } from './create-page.ts';
@@ -30,7 +31,7 @@ import { updateFileFromUrl } from './update-file-from-url.ts';
 import { oauthStatus } from './oauth-status.ts';
 import { oauthLogout } from './oauth-logout.ts';
 
-// Every tool that runs with a ToolContext: the core tools and each extension
+// Every tool but the wiki-management ones: the core tools and each extension
 // pack's. registerAllTools registers this list and the read-only gate reads it,
 // so the two cannot disagree.
 //
@@ -54,6 +55,7 @@ export const standardTools: Tool<any>[] = [
 	getSiteInfo,
 	getCategoryMembers,
 	getLinksHere,
+	getRandomPages,
 	listWikis,
 	whoami,
 	createPage,

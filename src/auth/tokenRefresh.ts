@@ -8,13 +8,7 @@ const REFRESH_THRESHOLD_MS = 60_000;
 
 export interface RefreshContext {
 	clientId: string;
-	metadata: Pick<UpstreamAsMetadata, 'token_endpoint'>;
-}
-
-const inFlight = new Map<string, Promise<string>>();
-
-export function _resetRefreshDedupForTesting(): void {
-	inFlight.clear();
+	metadata: Pick<UpstreamAsMetadata, 'token_endpoint' | 'issuer'>;
 }
 
 /**
@@ -44,16 +38,7 @@ export async function refreshIfNeeded(
 		throw new OAuthFlowError('invalid_grant', 'Stored token expired with no refresh_token');
 	}
 
-	const existing = inFlight.get(wikiKey);
-	if (existing !== undefined) {
-		return existing;
-	}
-
-	const pending = doRefresh(wikiKey, ctx, cur.refresh_token, cur.scopes).finally(() => {
-		inFlight.delete(wikiKey);
-	});
-	inFlight.set(wikiKey, pending);
-	return pending;
+	return doRefresh(wikiKey, ctx, cur.refresh_token, cur.scopes);
 }
 
 async function doRefresh(
@@ -95,6 +80,7 @@ async function doRefresh(
 		expires_at: expiresAtIso,
 		scopes: tok.scope !== undefined ? tok.scope.split(' ') : currentScopes,
 		obtained_at: nowIso,
+		issuer: ctx.metadata.issuer,
 	});
 
 	return tok.access_token;

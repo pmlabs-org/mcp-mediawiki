@@ -2,8 +2,12 @@ import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { emitStartupBanner } from '../../src/runtime/banner.ts';
 import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
-import type { ActiveWiki } from '../../src/wikis/activeWiki.ts';
+import { UploadDirsImpl } from '../../src/wikis/uploadDirs.ts';
 import type { WikiConfig } from '../../src/config/loadConfig.ts';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
 
 const baseWikiConfig: WikiConfig = {
 	sitename: 'A',
@@ -20,12 +24,7 @@ const mockWikiRegistry: WikiRegistry = {
 	isManagementAllowed: () => false,
 };
 
-const mockActiveWiki: ActiveWiki = {
-	get: () => ({ key: 'a.example', config: baseWikiConfig }),
-	getDefaultKey: () => 'a.example',
-};
-
-const mockUploadDirs = { list: () => [] };
+const mockUploadDirs = new UploadDirsImpl([]);
 
 function captureLines(spy: StderrWriteSpy): Record<string, unknown>[] {
 	return spy.mock.calls
@@ -52,8 +51,9 @@ describe('startup banner', () => {
 			{ transport: 'stdio' },
 			{
 				wikiRegistry: mockWikiRegistry,
-				activeWiki: mockActiveWiki,
+				defaultWikiKey: 'a.example',
 				uploadDirs: mockUploadDirs,
+				auth: fakeAuthPolicy(),
 			},
 		);
 
@@ -88,8 +88,9 @@ describe('startup banner', () => {
 			},
 			{
 				wikiRegistry: mockWikiRegistry,
-				activeWiki: mockActiveWiki,
+				defaultWikiKey: 'a.example',
 				uploadDirs: mockUploadDirs,
+				auth: fakeAuthPolicy({ transport: 'http' }),
 			},
 		);
 
@@ -114,8 +115,9 @@ describe('startup banner', () => {
 			},
 			{
 				wikiRegistry: mockWikiRegistry,
-				activeWiki: mockActiveWiki,
+				defaultWikiKey: 'a.example',
 				uploadDirs: mockUploadDirs,
+				auth: fakeAuthPolicy({ transport: 'http' }),
 			},
 		);
 
@@ -135,9 +137,12 @@ describe('startup banner', () => {
 			},
 			{
 				wikiRegistry: mockWikiRegistry,
-				activeWiki: mockActiveWiki,
+				defaultWikiKey: 'a.example',
 				uploadDirs: mockUploadDirs,
-				proxyEnabled: true,
+				auth: fakeAuthPolicy({
+					transport: 'http',
+					hostedProxy: fakeHostedProxy(fakeProxyConfig(), new InMemoryProxyStore()),
+				}),
 			},
 		);
 
@@ -161,8 +166,9 @@ describe('startup banner', () => {
 			{ transport: 'stdio' },
 			{
 				wikiRegistry: staticRegistry,
-				activeWiki: mockActiveWiki,
+				defaultWikiKey: 'a.example',
 				uploadDirs: mockUploadDirs,
+				auth: fakeAuthPolicy(),
 			},
 		);
 

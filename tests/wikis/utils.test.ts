@@ -1,26 +1,10 @@
 import { describe, it, expect } from 'vitest';
 import type { ToolContext } from '../../src/runtime/context.ts';
-import { formatEditComment } from '../../src/wikis/utils.ts';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { buildPageUrl, formatEditComment, resolveBotFlag } from '../../src/wikis/utils.ts';
+import { fakeContext, probeReporting, withWikiConfig } from '../helpers/fakeContext.ts';
 
 function ctxWithAttribution(attributeEdits?: boolean): ToolContext {
-	return fakeContext({
-		activeWiki: {
-			get: () =>
-				({
-					key: 'test-wiki',
-					config: {
-						sitename: 'Test',
-						server: 'https://test.wiki',
-						articlepath: '/wiki',
-						scriptpath: '/w',
-						tags: null,
-						attributeEdits,
-					},
-				}) as never,
-			getDefaultKey: () => 'test-wiki',
-		},
-	});
+	return withWikiConfig(fakeContext(), { attributeEdits });
 }
 
 describe('formatEditComment', () => {
@@ -57,5 +41,71 @@ describe('formatEditComment', () => {
 	it('returns no summary for an empty-string comment when attribution is off', () => {
 		const result = formatEditComment(ctxWithAttribution(false), 'update-page', '');
 		expect(result).toBeUndefined();
+	});
+});
+
+function ctxWithArticlePath(articlepath: string): ToolContext {
+	return fakeContext({ wikiProbe: probeReporting({ server: 'https://test.wiki', articlepath }) });
+}
+
+describe('buildPageUrl', () => {
+	it('appends the title to an article path without a $1 placeholder', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/wiki'), 'List of cities');
+		expect(url).toBe('https://test.wiki/wiki/List_of_cities');
+	});
+
+	it('puts the title in place of $1 in a query-string article path', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/w/index.php?title=$1'), 'Main Page');
+		expect(url).toBe('https://test.wiki/w/index.php?title=Main_Page');
+	});
+
+	it('encodes an ampersand so it stays inside the title query value', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/w/index.php?title=$1'), 'AT&T');
+		expect(url).toBe('https://test.wiki/w/index.php?title=AT%26T');
+	});
+
+	it('encodes a question mark so it stays inside the title path', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/wiki'), 'What?');
+		expect(url).toBe('https://test.wiki/wiki/What%3F');
+	});
+
+	it('keeps namespace colons and subpage slashes readable', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/wiki'), 'Help:Editing/Tables');
+		expect(url).toBe('https://test.wiki/wiki/Help:Editing/Tables');
+	});
+
+	it('keeps dollar signs in the title literal', async () => {
+		const url = await buildPageUrl(ctxWithArticlePath('/w/index.php?title=$1'), 'Ca$$h');
+		expect(url).toBe('https://test.wiki/w/index.php?title=Ca$$h');
+	});
+});
+
+describe('resolveBotFlag', () => {
+	// The whole decision table: the call's own value wins in both directions,
+	// the wiki setting decides only when the call says nothing, and with neither
+	// the answer is false, which is the behaviour from before the setting existed.
+	it.each([
+		{ call: undefined, wiki: undefined, expected: false },
+		{ call: undefined, wiki: false, expected: false },
+		{ call: undefined, wiki: true, expected: true },
+		{ call: true, wiki: undefined, expected: true },
+		{ call: true, wiki: false, expected: true },
+		{ call: true, wiki: true, expected: true },
+		{ call: false, wiki: undefined, expected: false },
+		{ call: false, wiki: false, expected: false },
+		{ call: false, wiki: true, expected: false },
+	])(
+		'is $expected when the call says $call and the wiki says $wiki',
+		({ call, wiki, expected }) => {
+			const ctx = withWikiConfig(fakeContext(), { bot: wiki });
+
+			expect(resolveBotFlag(ctx, call)).toBe(expected);
+		},
+	);
+
+	it('does not flag an edit for a configured string such as "false"', () => {
+		const ctx = withWikiConfig(fakeContext(), { bot: 'false' as never });
+
+		expect(resolveBotFlag(ctx, undefined)).toBe(false);
 	});
 });

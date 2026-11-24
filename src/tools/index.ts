@@ -1,9 +1,9 @@
 import type { McpServer, RegisteredTool } from '@modelcontextprotocol/server';
-import { errorMessage } from '../errors/isErrnoException.ts';
+import { errorMessage } from '../errors/errorMessage.ts';
 import { logger } from '../runtime/logger.ts';
 import type { Tool } from '../runtime/tool.ts';
-import type { ToolContext, ManagementContext } from '../runtime/context.ts';
-import type { Reconcile } from '../runtime/reconcile.ts';
+import type { SharedContext, ManagementContext } from '../runtime/context.ts';
+import type { DeclaredTool, Reconcile } from '../runtime/reconcile.ts';
 import { dispatch } from '../runtime/dispatcher.ts';
 import { register } from '../runtime/register.ts';
 
@@ -15,10 +15,13 @@ import { removeWiki } from './remove-wiki.ts';
 // oxlint-disable-next-line typescript/no-explicit-any
 const managementTools: Tool<any, ManagementContext>[] = [addWiki, removeWiki];
 
+// Every tool the server registers, for reconcile to read their declarations.
+export const allTools: readonly DeclaredTool[] = [...standardTools, ...managementTools];
+
 export function registerAllTools(
 	server: McpServer,
 	reconcile: Reconcile,
-	ctx: ToolContext,
+	ctx: SharedContext,
 ): Map<string, RegisteredTool> {
 	const registered = new Map<string, RegisteredTool>();
 

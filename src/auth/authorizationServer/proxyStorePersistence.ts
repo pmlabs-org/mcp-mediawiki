@@ -1,7 +1,7 @@
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from 'node:fs';
 import * as path from 'node:path';
 import { isErrnoException } from '../../errors/isErrnoException.ts';
-import { recordStoreFlush, recordStoreFlushFailure } from '../../runtime/metrics.ts';
+import type { Metrics } from '../../runtime/metrics.ts';
 import { getProxyStorePath } from '../paths.ts';
 import type { ProxyConfig } from './proxyConfig.ts';
 import { deriveKey, decrypt, encrypt } from './proxyStoreCrypto.ts';
@@ -16,6 +16,7 @@ import {
 	type TransactionRecord,
 	type UpstreamToken,
 } from './proxyStore.ts';
+import { errorMessage } from '../../errors/errorMessage.ts';
 
 export class ProxyStorePersistenceError extends Error {
 	public constructor(message: string) {
@@ -47,6 +48,7 @@ export class PersistentProxyStore implements ProxyStore {
 		private inner: InMemoryProxyStore,
 		private file: string,
 		private key: Buffer,
+		private metrics: Metrics,
 		private onError: (err: Error) => void = () => {},
 	) {}
 
@@ -164,7 +166,7 @@ export class PersistentProxyStore implements ProxyStore {
 			this.inner.restoreDurable(snapshot);
 		} catch (err: unknown) {
 			throw new ProxyStorePersistenceError(
-				`Proxy store at ${this.file}: ${err instanceof Error ? err.message : String(err)}; back up and remove it to reset.`,
+				`Proxy store at ${this.file}: ${errorMessage(err)}; back up and remove it to reset.`,
 			);
 		}
 	}
@@ -193,7 +195,7 @@ export class PersistentProxyStore implements ProxyStore {
 			writeFileSync(tmp, blob, { mode: 0o600 });
 			renameSync(tmp, this.file);
 			this.dirty = false;
-			recordStoreFlush(monotonicNow() - start);
+			this.metrics.recordStoreFlush(monotonicNow() - start);
 		} catch (err: unknown) {
 			// Best-effort durability: a disk failure must not break the live request. The
 			// record stays valid in memory; persistence is re-attempted by the next
@@ -202,7 +204,7 @@ export class PersistentProxyStore implements ProxyStore {
 			// snapshot on the token path (where `dirty` is usually already clear).
 			// Count the failure so a slow-and-failing flush is visible to /metrics, not
 			// only in the onError log. inc() never throws, so it stays out of the way.
-			recordStoreFlushFailure();
+			this.metrics.recordStoreFlushFailure();
 			try {
 				this.onError(err instanceof Error ? err : new Error(String(err)));
 			} catch {
@@ -212,22 +214,17 @@ export class PersistentProxyStore implements ProxyStore {
 	}
 }
 
-/**
- * Build the proxy store for a resolved proxy config. No config (proxy disabled) →
- * a plain in-memory store. Otherwise a PersistentProxyStore hydrated synchronously
- * from disk before it is returned (and thus before the server binds).
- */
+/** Hydrated synchronously, so before the server binds. */
 export function createProxyStore(
-	pc: ProxyConfig | null,
+	pc: ProxyConfig,
+	metrics: Metrics,
 	opts: { onError?: (err: Error) => void } = {},
 ): ProxyStore {
-	if (!pc) {
-		return new InMemoryProxyStore();
-	}
 	const store = new PersistentProxyStore(
 		new InMemoryProxyStore(),
 		getProxyStorePath(),
 		deriveKey(pc.signingKey),
+		metrics,
 		opts.onError,
 	);
 	store.hydrate();

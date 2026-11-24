@@ -1,4 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { allTools } from '../../src/tools/index.ts';
 
 vi.mock('../../src/wikis/wikiDiscovery.ts', () => ({
 	discoverWiki: vi.fn(),
@@ -8,7 +9,7 @@ import type { RegisteredTool } from '@modelcontextprotocol/server';
 import { discoverWiki } from '../../src/wikis/wikiDiscovery.ts';
 import { WikiTimeoutError } from '../../src/errors/wikiTimeoutError.ts';
 import { WIKI_CONNECT_TIMEOUT_MS } from '../../src/runtime/callDeadline.ts';
-import { SsrfValidationError } from '../../src/transport/ssrfGuard.ts';
+import { SsrfValidationError } from '../../src/outbound/ssrfGuard.ts';
 import { DuplicateWikiKeyError, WikiRegistryImpl } from '../../src/wikis/wikiRegistry.ts';
 import type { WikiConfig } from '../../src/config/loadConfig.ts';
 import { reconcileTools } from '../../src/runtime/reconcile.ts';
@@ -140,8 +141,11 @@ describe('add-wiki', () => {
 		const deps = {
 			wikiRegistry: registry,
 			transport: 'http' as const,
-			wikiProbe: { hasAnyExtension: async () => false } as never,
+			wikiProbe: {
+				inspect: async () => ({ reachable: true, extensions: new Set<string>() }),
+			} as never,
 			extensionPacks: [],
+			descriptors: allTools,
 		};
 
 		await reconcileTools(tools, deps);

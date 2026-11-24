@@ -147,47 +147,11 @@ Descriptions state the default cap with a "by default" qualifier (e.g., "truncat
 
 The byte budget for content bodies is centrally resolved via `contentMaxBytes()` in `src/results/truncation.ts` — it reads the `MCP_CONTENT_MAX_BYTES` environment variable and falls back to `DEFAULT_CONTENT_MAX_BYTES` (75000). Tools do not invent their own limits. A cut body is a byte-exact prefix of the whole: the cut moves back to a character boundary rather than splitting a multi-byte character, because a caller may write the returned text back to the wiki and it must carry nothing the page did not. Section-aware tools (`get-page`, `get-pages`) include a section list in the marker so the caller can navigate without a follow-up "list sections" call.
 
-The budget is per response, not per body, and it bounds the content bodies rather than the whole payload: the metadata around them is small and fixed, and counting it would make the number depend on how many fields a tool happens to return. A tool returning one body caps that body. A tool returning a sequence of bodies (`get-pages`) spends the one budget across them, keeping whole items in the order asked for and naming the items past the point where it runs out, because a cut body in a batch is neither usable nor worth its bytes. `get-file-data` is the exception the rule needs stating against: binary cannot be truncated, so it sets its own `MCP_FILE_DATA_MAX_BYTES` and makes over-cap a hard error.
+The budget is per response, not per body, and it bounds the content bodies rather than the whole payload: the metadata around them is small and fixed, and counting it would make the number depend on how many fields a tool happens to return. A tool returning one body caps that body. A tool returning a sequence of bodies (`get-pages`) spends the one budget across them, keeping whole items in the order asked for and naming the items past the point where it runs out, because a cut body in a batch is neither usable nor worth its bytes. Row listings (`cargo-query`, `smw-query`, `bucket-query`) spend it the same way on whole rows, measured as JSON; a row that alone exceeds the budget is left out, and the marker names how to narrow it or skip it. `get-file-data` is the exception the rule needs stating against: binary cannot be truncated, so it sets its own `MCP_FILE_DATA_MAX_BYTES` and makes over-cap a hard error.
 
 This convention doesn't apply to tools that reject oversize input (e.g. `get-pages`' 50-title cap): those return an error, not a truncation marker.
 
 There is no MCP-spec-level budget for tool output. Cap sizes are chosen to stay under Anthropic's 25,000-token Claude Code default ([Writing tools for agents](https://www.anthropic.com/engineering/writing-tools-for-agents)), which a client enforces by cutting the response itself, unmarked — the failure the cap exists to pre-empt. Wikitext runs around three bytes to the token, markup being denser than prose, so the 75000-byte default sits near 25,000 tokens and a larger one would not. Revisit when [MCP discussion #2211](https://github.com/modelcontextprotocol/modelcontextprotocol/discussions/2211) ratifies a standard.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
-
-#### Response channels
-
-A successful result carries its payload twice: as prose in `content[0]` and as JSON in `structuredContent`. Which channel the model sees depends on the client, and it may be only one of them, so both carry the complete payload. No tool declares an `outputSchema`, and none should until a client needs the contract: the declaration reaches every client through `tools/list`, whether or not it uses it.
 
 #### Response channels
 

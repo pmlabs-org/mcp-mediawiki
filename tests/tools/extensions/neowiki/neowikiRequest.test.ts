@@ -1,20 +1,10 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn } from '../../../helpers/mock-mwn.ts';
-import { fakeContext } from '../../../helpers/fakeContext.ts';
-import {
-	neowikiRequest,
-	neowikiErrorResult,
-	NeoWikiApiError,
-} from '../../../../src/tools/extensions/neowiki/neowikiRequest.ts';
+import { neowikiRequest } from '../../../../src/tools/extensions/neowiki/neowikiRequest.ts';
+import { ClassifiedError } from '../../../../src/errors/classifyError.ts';
 import { WikiTimeoutError } from '../../../../src/errors/wikiTimeoutError.ts';
 import { rejectionOf } from '../../../helpers/rejectionOf.ts';
-
-// Builds an axios-style rejection: a thrown error carrying `.response`.
-function httpError(status: number, data: unknown): Error & { response: unknown } {
-	const err = new Error(`HTTP ${status}`) as Error & { response: unknown };
-	err.response = { status, data };
-	return err;
-}
+import { httpError } from '../../../helpers/httpError.ts';
 
 describe('neowikiRequest', () => {
 	it('derives the REST base from apiUrl and sends a GET with query string', async () => {
@@ -43,7 +33,7 @@ describe('neowikiRequest', () => {
 		// Converted, the tool returns it as a RESULT the dispatcher never sees,
 		// losing the code and the write caveat.
 		expect(err).toBeInstanceOf(WikiTimeoutError);
-		expect(err).not.toBeInstanceOf(NeoWikiApiError);
+		expect(err).not.toBeInstanceOf(ClassifiedError);
 	});
 
 	it('JSON-encodes a POST body and sets Content-Type', async () => {
@@ -122,6 +112,54 @@ describe('neowikiRequest', () => {
 		});
 	});
 
+	it('maps a read-denied envelope to permission_denied', async () => {
+		const mock = createMockMwn({
+			rawRequest: vi
+				.fn()
+				.mockRejectedValue(
+					httpError(403, { error: 'rest-read-denied', httpCode: 403, httpReason: 'Forbidden' }),
+				),
+		});
+		await expect(
+			neowikiRequest(mock as never, { method: 'GET', path: '/schemas' }),
+		).rejects.toMatchObject({ category: 'permission_denied' });
+	});
+
+	it('records the HTTP status the wiki answered with', async () => {
+		const mock = createMockMwn({
+			rawRequest: vi.fn().mockRejectedValue(httpError(409, { status: 'error', message: 'taken' })),
+		});
+		await expect(
+			neowikiRequest(mock as never, { method: 'POST', path: '/subject', body: {} }),
+		).rejects.toMatchObject({ upstreamStatus: 409 });
+	});
+
+	it('maps a refused write to invalid_input and carries its violations', async () => {
+		const mock = createMockMwn({
+			rawRequest: vi.fn().mockRejectedValue(
+				httpError(422, {
+					status: 'error',
+					message: 'Validation failed',
+					violations: [
+						{
+							propertyName: null,
+							code: 'dependent-subject-without-host',
+							args: [],
+							severity: 'error',
+							subjectId: 's1demo6sssssss1',
+						},
+					],
+				}),
+			),
+		});
+		const err = await rejectionOf(
+			neowikiRequest(mock as never, { method: 'PUT', path: '/subject/s1', body: {}, csrf: true }),
+		);
+		expect(err).toMatchObject({ category: 'invalid_input' });
+		expect((err as Error).message).toContain('dependent-subject-without-host');
+		expect((err as Error).message).toContain('s1demo6sssssss1');
+	});
+
 	it('maps a 404 to not_found', async () => {
 		const mock = createMockMwn({
 			rawRequest: vi.fn().mockRejectedValue(httpError(404, { error: 'not-found' })),
@@ -146,13 +184,6 @@ describe('neowikiRequest', () => {
 			category: 'upstream_failure',
 			message: 'Error: Unsupported Cypher value type: DateTime',
 		});
-	});
-
-	it('neowikiErrorResult renders a NeoWikiApiError and re-throws others', () => {
-		const ctx = fakeContext();
-		const res = neowikiErrorResult(new NeoWikiApiError('not_found', 'gone'), ctx);
-		expect(res.isError).toBe(true);
-		expect(() => neowikiErrorResult(new Error('boom'), ctx)).toThrow('boom');
 	});
 
 	it('throws upstream_failure when apiUrl is not set', async () => {

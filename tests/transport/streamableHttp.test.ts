@@ -2,17 +2,11 @@ import { describe, it, expect, vi } from 'vitest';
 
 import express, { type Express } from 'express';
 import request from 'supertest';
+import { INTERNAL_ERROR, PARSE_ERROR } from '@modelcontextprotocol/server';
 import {
-	createMcpHandler,
-	INTERNAL_ERROR,
-	McpServer,
-	PARSE_ERROR,
-} from '@modelcontextprotocol/server';
-import {
+	buildApp,
 	errorHandler,
 	handleListenError,
-	resolveMcpHostValidation,
-	resolveMcpOriginValidation,
 	toOriginHostnames,
 } from '../../src/transport/streamableHttp.ts';
 import {
@@ -20,10 +14,15 @@ import {
 	PAYLOAD_TOO_LARGE_ERROR_CODE,
 	UPSTREAM_UNAVAILABLE_ERROR_CODE,
 } from '../../src/transport/errorCodes.ts';
-import { createMcpRouteHandler } from '../../src/transport/mcpRoute.ts';
 import { createInFlightCounter } from '../../src/transport/inFlight.ts';
 import { getRuntimeToken, withRequestContext } from '../../src/runtime/requestContext.ts';
 import { logger } from '../../src/runtime/logger.ts';
+import type { AuthPolicy } from '../../src/runtime/authShape.ts';
+import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
+import { fakeAppDeps } from '../helpers/fakeAppDeps.ts';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
 
 describe('handleListenError', () => {
 	function listenErr(code: string): NodeJS.ErrnoException {
@@ -60,67 +59,57 @@ describe('handleListenError', () => {
 	});
 });
 
+const toolsListBody = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
+
+function withHostedProxy(): AuthPolicy {
+	return fakeAuthPolicy({
+		transport: 'http',
+		hostedProxy: fakeHostedProxy(fakeProxyConfig(), new InMemoryProxyStore()),
+	});
+}
+
 describe('host validation (scoped to /mcp)', () => {
-	function buildApp(host: string, allowedHosts?: string[]): Express {
-		const app = express();
-		app.use(express.json());
-		const validation = resolveMcpHostValidation(host, allowedHosts);
-		if (validation) {
-			app.use('/mcp', validation);
-		}
-		app.post('/mcp', (_req, res) => {
-			res.status(200).json({ ok: true });
-		});
-		app.get('/health', (_req, res) => {
-			res.status(200).json({ status: 'ok' });
-		});
-		return app;
+	function appBoundTo(host: string, allowedHosts: string[] | undefined): Express {
+		return buildApp(fakeAppDeps({ host, allowedHosts })).app;
+	}
+
+	function postWithHost(app: Express, host: string): request.Test {
+		return request(app)
+			.post('/mcp')
+			.set('Host', host)
+			.set('Accept', 'application/json, text/event-stream')
+			.send(toolsListBody);
 	}
 
 	it('accepts localhost Host when bound to 127.0.0.1 with default allowlist', async () => {
-		const res = await request(buildApp('127.0.0.1'))
-			.post('/mcp')
-			.set('Host', '127.0.0.1:3000')
-			.send({});
+		const res = await postWithHost(appBoundTo('127.0.0.1', undefined), '127.0.0.1:3000');
 		expect(res.status).toBe(200);
 	});
 
 	it('rejects non-local Host when bound to 127.0.0.1 with default allowlist', async () => {
-		const res = await request(buildApp('127.0.0.1'))
-			.post('/mcp')
-			.set('Host', 'evil.example:3000')
-			.send({});
+		const res = await postWithHost(appBoundTo('127.0.0.1', undefined), 'evil.example:3000');
 		expect(res.status).toBe(403);
 		expect(res.body?.error?.message).toMatch(/Invalid Host/);
 	});
 
 	it('accepts configured Host when explicit allowlist is set', async () => {
-		const res = await request(buildApp('0.0.0.0', ['wiki.example.org']))
-			.post('/mcp')
-			.set('Host', 'wiki.example.org')
-			.send({});
+		const res = await postWithHost(appBoundTo('0.0.0.0', ['wiki.example.org']), 'wiki.example.org');
 		expect(res.status).toBe(200);
 	});
 
 	it('rejects unlisted Host when explicit allowlist is set', async () => {
-		const res = await request(buildApp('0.0.0.0', ['wiki.example.org']))
-			.post('/mcp')
-			.set('Host', 'other.example')
-			.send({});
+		const res = await postWithHost(appBoundTo('0.0.0.0', ['wiki.example.org']), 'other.example');
 		expect(res.status).toBe(403);
 		expect(res.body?.error?.message).toMatch(/Invalid Host/);
 	});
 
 	it('accepts any Host when bound to 0.0.0.0 without allowlist', async () => {
-		const res = await request(buildApp('0.0.0.0'))
-			.post('/mcp')
-			.set('Host', 'anything.example')
-			.send({});
+		const res = await postWithHost(appBoundTo('0.0.0.0', undefined), 'anything.example');
 		expect(res.status).toBe(200);
 	});
 
 	it('leaves /health reachable even when an explicit allowlist is set', async () => {
-		const res = await request(buildApp('0.0.0.0', ['wiki.example.org']))
+		const res = await request(appBoundTo('0.0.0.0', ['wiki.example.org']))
 			.get('/health')
 			.set('Host', 'localhost:8080');
 		expect(res.status).toBe(200);
@@ -180,7 +169,7 @@ describe('toOriginHostnames', () => {
 	});
 });
 
-describe('origin validation (middleware)', () => {
+describe('origin validation on /mcp', () => {
 	const initializeBody = {
 		jsonrpc: '2.0',
 		id: 1,
@@ -192,19 +181,8 @@ describe('origin validation (middleware)', () => {
 		},
 	};
 
-	// Attaches the guard per route, as the real buildApp does. Mounting it on the
-	// '/mcp' prefix instead would also cover the authorization-server routes; the
-	// proxy suite covers that specifically.
-	function buildApp(allowedOrigins: readonly string[]): Express {
-		const app = express();
-		app.use(express.json());
-		const guard = [resolveMcpOriginValidation(allowedOrigins)];
-		const handler = createMcpHandler(
-			() => new McpServer({ name: 'origin-test-server', version: '0.0.0' }, { capabilities: {} }),
-			{ legacy: 'stateless' },
-		);
-		app.post('/mcp', ...guard, createMcpRouteHandler(handler));
-		return app;
+	function appAllowing(allowedOrigins: readonly string[]): Express {
+		return buildApp(fakeAppDeps({ allowedOrigins })).app;
 	}
 
 	function post(app: Express, origin?: string): request.Test {
@@ -215,7 +193,7 @@ describe('origin validation (middleware)', () => {
 	}
 
 	it('returns 403 with a JSON-RPC error body when the Origin header is not in the allowlist', async () => {
-		const res = await post(buildApp(['http://good.example']), 'http://evil.example');
+		const res = await post(appAllowing(['http://good.example']), 'http://evil.example');
 		expect(res.status).toBe(403);
 		expect(res.body?.jsonrpc).toBe('2.0');
 		expect(res.body?.id).toBeNull();
@@ -225,19 +203,19 @@ describe('origin validation (middleware)', () => {
 	});
 
 	it('does not reject when the Origin header matches an allowlist entry', async () => {
-		const res = await post(buildApp(['http://good.example']), 'http://good.example');
+		const res = await post(appAllowing(['http://good.example']), 'http://good.example');
 		expect(res.status).not.toBe(403);
 	});
 
 	// The match is on hostname, so a different port or scheme on an allowed host
 	// passes where the previous exact-origin comparison would have rejected it.
 	it('accepts another port on an allowlisted host', async () => {
-		const res = await post(buildApp(['https://good.example']), 'https://good.example:8443');
+		const res = await post(appAllowing(['https://good.example']), 'https://good.example:8443');
 		expect(res.status).not.toBe(403);
 	});
 
 	it('rejects an Origin header that cannot be parsed', async () => {
-		const res = await post(buildApp(['http://good.example']), 'not-a-url');
+		const res = await post(appAllowing(['http://good.example']), 'not-a-url');
 		expect(res.status).toBe(403);
 		expect(res.body?.error?.message).toMatch(/origin/i);
 	});
@@ -245,7 +223,7 @@ describe('origin validation (middleware)', () => {
 	// An empty allowlist is the non-loopback default. It must refuse the browser
 	// request rather than wave it through, which is what an absent guard did.
 	it('rejects any Origin when the allowlist is empty', async () => {
-		const res = await post(buildApp([]), 'http://anything.example');
+		const res = await post(appAllowing([]), 'http://anything.example');
 		expect(res.status).toBe(403);
 	});
 
@@ -254,24 +232,15 @@ describe('origin validation (middleware)', () => {
 	it.each([[['http://good.example']], [[]]])(
 		'does not reject when the Origin header is absent (allowlist %j)',
 		async (origins) => {
-			const res = await post(buildApp(origins));
+			const res = await post(appAllowing(origins));
 			expect(res.status).not.toBe(403);
 		},
 	);
 });
 
 describe('request body size cap', () => {
-	function buildApp(limit: string): Express {
-		const app = express();
-		app.use(express.json({ limit }));
-		app.use(errorHandler(limit));
-		app.post('/mcp', (req, res) => {
-			res.status(200).json({ ok: true, length: JSON.stringify(req.body).length });
-		});
-		app.post('/mcp/register', (_req, res) => {
-			res.status(201).json({ ok: true });
-		});
-		return app;
+	function appCapping(limit: string): Express {
+		return buildApp(fakeAppDeps({ maxRequestBody: limit, auth: withHostedProxy() })).app;
 	}
 
 	function jsonRpcEnvelope(payloadBytes: number): Record<string, unknown> {
@@ -287,16 +256,16 @@ describe('request body size cap', () => {
 	}
 
 	it('accepts a body well under the configured cap', async () => {
-		const res = await request(buildApp('200kb'))
+		const res = await request(appCapping('200kb'))
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
+			.set('Accept', 'application/json, text/event-stream')
 			.send(jsonRpcEnvelope(50 * 1024));
 		expect(res.status).toBe(200);
-		expect(res.body?.ok).toBe(true);
 	});
 
 	it('returns a JSON-RPC 413 when the body exceeds the configured cap', async () => {
-		const res = await request(buildApp('50kb'))
+		const res = await request(appCapping('50kb'))
 			.post('/mcp')
 			.set('Content-Type', 'application/json')
 			.send(jsonRpcEnvelope(200 * 1024));
@@ -311,7 +280,7 @@ describe('request body size cap', () => {
 	});
 
 	it('returns an OAuth 413, not a JSON-RPC one, on an authorization-server route', async () => {
-		const res = await request(buildApp('50kb'))
+		const res = await request(appCapping('50kb'))
 			.post('/mcp/register')
 			.set('Content-Type', 'application/json')
 			.send(jsonRpcEnvelope(200 * 1024));
@@ -323,21 +292,11 @@ describe('request body size cap', () => {
 });
 
 describe('malformed JSON body', () => {
-	function buildApp(): Express {
-		const app = express();
-		app.use(express.json());
-		app.use(errorHandler('1mb'));
-		app.post('/mcp', (_req, res) => {
-			res.status(200).json({ ok: true });
-		});
-		app.post('/mcp/register', (_req, res) => {
-			res.status(201).json({ ok: true });
-		});
-		return app;
-	}
-
 	function postBroken(path: string): request.Test {
-		return request(buildApp()).post(path).set('Content-Type', 'application/json').send('{"a":');
+		return request(buildApp(fakeAppDeps({ auth: withHostedProxy() })).app)
+			.post(path)
+			.set('Content-Type', 'application/json')
+			.send('{"a":');
 	}
 
 	it('returns a JSON-RPC parse error on the MCP endpoint', async () => {
@@ -455,8 +414,8 @@ describe('transport-emitted JSON-RPC error codes', () => {
 describe('withRequestContext', () => {
 	it('propagates the bearer token into the async store', async () => {
 		let observedToken: string | undefined;
-		await withRequestContext('tok123', async () => {
-			observedToken = getRuntimeToken();
+		await withRequestContext({ value: 'tok123', wikiKey: null }, async () => {
+			observedToken = getRuntimeToken('any-wiki');
 		});
 		expect(observedToken).toBe('tok123');
 	});
@@ -464,7 +423,7 @@ describe('withRequestContext', () => {
 	it('leaves the store tokenless when no bearer is supplied', async () => {
 		let observedToken: string | undefined;
 		await withRequestContext(undefined, async () => {
-			observedToken = getRuntimeToken();
+			observedToken = getRuntimeToken('any-wiki');
 		});
 		expect(observedToken).toBeUndefined();
 	});

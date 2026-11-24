@@ -1,7 +1,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest';
 import type { ImageContent, TextContent } from '@modelcontextprotocol/server';
 import { createMockMwn } from '../helpers/mock-mwn.ts';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { contextOn } from '../helpers/fakeContext.ts';
 import { getFileData } from '../../src/tools/get-file-data.ts';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import { assertStructuredError } from '../helpers/structuredResult.ts';
@@ -54,7 +54,7 @@ afterEach(() => {
 describe('get-file-data', () => {
 	it('returns an image content block for a renderable image', async () => {
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -74,11 +74,20 @@ describe('get-file-data', () => {
 		);
 	});
 
+	it("looks up a title with a File prefix in the wiki's language as given", async () => {
+		const mock = mwnWith(IMAGE_INFO);
+		const ctx = contextOn(mock);
+
+		await getFileData.handle({ title: 'Datei:Example.png', format: 'image' }, ctx);
+
+		expect((mock.request.mock.calls[0][0] as { titles: string }).titles).toBe('Datei:Example.png');
+	});
+
 	it('attaches the OAuth2 bearer when the file is same-origin as the wiki API', async () => {
 		const mock = mwnWith(IMAGE_INFO);
 		mock.usingOAuth2 = true;
 		mock.options = { apiUrl: 'https://test.wiki/w/api.php', OAuth2AccessToken: 'secret-token' };
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -96,7 +105,7 @@ describe('get-file-data', () => {
 		});
 		mock.usingOAuth2 = true;
 		mock.options = { apiUrl: 'https://test.wiki/w/api.php', OAuth2AccessToken: 'secret-token' };
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -106,7 +115,7 @@ describe('get-file-data', () => {
 
 	it('preserves the image block through the dispatcher (no structuredContent clobber)', async () => {
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await dispatch(
 			getFileData,
@@ -130,7 +139,7 @@ describe('get-file-data', () => {
 	it('falls back to the original mime when the response has no content-type', async () => {
 		const mock = mwnWith(IMAGE_INFO);
 		mock.rawRequest = vi.fn().mockResolvedValue({ data: FAKE_BYTES, headers: {} });
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -154,7 +163,7 @@ describe('get-file-data', () => {
 			data: Buffer.from('<html>error</html>'),
 			headers: { 'content-type': 'text/html' },
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Doc.pdf', format: 'image' }, ctx);
 
@@ -164,7 +173,7 @@ describe('get-file-data', () => {
 
 	it('defaults width to 1024 in image mode and passes it to iiurlwidth', async () => {
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -173,7 +182,7 @@ describe('get-file-data', () => {
 
 	it('clamps width to 1568', async () => {
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		await getFileData.handle({ title: 'Example.png', width: 5000, format: 'image' }, ctx);
 
@@ -182,7 +191,7 @@ describe('get-file-data', () => {
 
 	it('returns base64 in a text block when format is text', async () => {
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Example.png', format: 'text' }, ctx);
 
@@ -206,7 +215,7 @@ describe('get-file-data', () => {
 			data: FAKE_BYTES,
 			headers: { 'content-type': 'image/jpeg' },
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Doc.pdf', format: 'image' }, ctx);
 
@@ -222,7 +231,7 @@ describe('get-file-data', () => {
 			size: 4242,
 			mime: 'audio/ogg',
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Sound.ogg', format: 'image' }, ctx);
 
@@ -234,7 +243,7 @@ describe('get-file-data', () => {
 	it('rejects an over-cap payload with invalid_input mentioning width', async () => {
 		vi.stubEnv('MCP_FILE_DATA_MAX_BYTES', '4');
 		const mock = mwnWith(IMAGE_INFO);
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
 
@@ -242,9 +251,31 @@ describe('get-file-data', () => {
 		expect(envelope.message.toLowerCase()).toContain('width');
 	});
 
+	it('returns a file the wiki serves from a shared repository such as Commons', async () => {
+		const mock = mwnWith(IMAGE_INFO);
+		mock.request.mockResolvedValue({
+			query: {
+				pages: [
+					{
+						title: 'File:Example.png',
+						missing: true,
+						known: true,
+						imagerepository: 'shared',
+						imageinfo: [IMAGE_INFO],
+					},
+				],
+			},
+		});
+		const ctx = contextOn(mock);
+
+		const result = await getFileData.handle({ title: 'Example.png', format: 'image' }, ctx);
+
+		expect((result.content[1] as ImageContent).data).toBe(FAKE_BYTES.toString('base64'));
+	});
+
 	it('returns not_found for a missing file', async () => {
 		const mock = mwnWith({}, { missing: true });
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getFileData.handle({ title: 'Missing.png', format: 'image' }, ctx);
 
@@ -256,7 +287,7 @@ describe('get-file-data', () => {
 		const mock = createMockMwn({
 			request: vi.fn().mockRejectedValue(new Error('API error')),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await dispatch(
 			getFileData,

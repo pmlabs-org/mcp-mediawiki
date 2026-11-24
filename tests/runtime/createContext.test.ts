@@ -1,10 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { createToolContext } from '../../src/runtime/createContext.ts';
+import { createSharedContext } from '../../src/runtime/createContext.ts';
 import { createAppState, type AppState } from '../../src/wikis/state.ts';
 import { logger } from '../../src/runtime/logger.ts';
 import { withRequestFields } from '../../src/runtime/requestContext.ts';
 import { callDeadline } from '../../src/runtime/callDeadline.ts';
 import type { Config } from '../../src/config/loadConfig.ts';
+import type { SharedContext } from '../../src/runtime/context.ts';
+import { writingWiki } from '../helpers/writingWiki.ts';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
+import { metricsOff } from '../helpers/metrics.ts';
 
 const testConfig: Config = {
 	defaultWiki: 'w',
@@ -23,7 +27,7 @@ const testConfig: Config = {
 };
 
 function contextOverStubbedBot(): {
-	ctx: ReturnType<typeof createToolContext>;
+	ctx: SharedContext;
 	calls: { signal?: AbortSignal }[];
 } {
 	const calls: { signal?: AbortSignal }[] = [];
@@ -33,33 +37,55 @@ function contextOverStubbedBot(): {
 			return {};
 		},
 	};
+	return { ctx: contextHandingOut(() => bot), calls };
+}
+
+/** A context whose provider hands out `instance()` for every acquisition of the wiki. */
+function contextHandingOut(instance: () => unknown): SharedContext {
+	const provider = { get: async (): Promise<unknown> => instance() };
 	const state = {
 		...createAppState(testConfig),
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- stub covering only the surface under test
-		mwnProvider: { get: async (): Promise<unknown> => bot } as unknown as AppState['mwnProvider'],
+		mwnProvider: provider as unknown as AppState['mwnProvider'],
 	};
-	return { ctx: createToolContext({ logger, state, transport: 'stdio' }), calls };
+	return createSharedContext({
+		logger,
+		state,
+		auth: fakeAuthPolicy(),
+		metrics: metricsOff(),
+	});
 }
 
-describe('createToolContext', () => {
-	it('populates all ToolContext fields', () => {
+/** Asks for the bot right as a tool call does, through the call's edit service and view of the wiki. */
+async function botRightInOneCall(ctx: SharedContext): Promise<boolean | undefined> {
+	const wiki = { key: 'w', config: testConfig.wikis.w };
+	return ctx.editFor(wiki).botRight(await ctx.mwnFor(wiki.key));
+}
+
+describe('createSharedContext', () => {
+	it('populates all SharedContext fields', () => {
 		const state = createAppState(testConfig);
-		const ctx = createToolContext({ logger, state, transport: 'stdio' });
-		expect(ctx.mwn).toBeTypeOf('function');
+		const metrics = metricsOff();
+		const ctx = createSharedContext({
+			logger,
+			state,
+			auth: fakeAuthPolicy(),
+			metrics,
+		});
+		expect(ctx.mwnFor).toBeTypeOf('function');
+		expect(ctx.editFor).toBeTypeOf('function');
 		expect(ctx.wikis).toBeDefined();
-		expect(ctx.activeWiki).toBeDefined();
+		expect(ctx.defaultWikiKey).toBe('w');
 		expect(ctx.uploadDirs).toBeDefined();
 		expect(ctx.wikiCache).toBeDefined();
 		expect(typeof ctx.wikiCache.invalidate).toBe('function');
-		expect(ctx.siteInfoCache).toBeDefined();
 		expect(ctx.wikiProbe).toBeDefined();
 		expect(ctx.sections).toBeDefined();
-		expect(ctx.edit).toBeDefined();
 		expect(ctx.revision).toBeDefined();
 		expect(ctx.format).toBeDefined();
 		expect(ctx.errors).toBeDefined();
 		expect(ctx.logger).toBe(logger);
-		expect(ctx.transport).toBe('stdio');
+		expect(ctx.metrics).toBe(metrics);
 	});
 
 	it('applies the request cancellation signal to the mwn instance it hands out', async () => {
@@ -67,7 +93,7 @@ describe('createToolContext', () => {
 		const controller = new AbortController();
 
 		await withRequestFields({ signal: controller.signal }, async () => {
-			const scoped = await ctx.mwn();
+			const scoped = await ctx.mwnFor('w');
 			await scoped.rawRequest({ url: 'https://test.wiki/w/api.php' });
 		});
 
@@ -80,13 +106,12 @@ describe('createToolContext', () => {
 		const { ctx, calls } = contextOverStubbedBot();
 
 		await withRequestFields({ deadline: callDeadline(20, 'calling') }, async () => {
-			await (await ctx.mwn()).rawRequest({ url: 'https://test.wiki/w/api.php' });
+			await (await ctx.mwnFor('w')).rawRequest({ url: 'https://test.wiki/w/api.php' });
 			await new Promise((resolve) => setTimeout(resolve, 40));
-			await (await ctx.mwn()).rawRequest({ url: 'https://test.wiki/w/api.php' });
+			await (await ctx.mwnFor('w')).rawRequest({ url: 'https://test.wiki/w/api.php' });
 		});
 
-		// Eleven tools acquire the bot twice — once for the work, once to build a
-		// page URL — so a budget armed per acquisition would multiply.
+		// A budget armed per acquisition would let a tool that acquires twice spend two.
 		expect(calls[0]?.signal?.aborted).toBe(true);
 		expect(calls[1]?.signal?.aborted).toBe(true);
 	});
@@ -94,10 +119,31 @@ describe('createToolContext', () => {
 	it('bounds calls made outside any request scope', async () => {
 		const { ctx, calls } = contextOverStubbedBot();
 
-		await (await ctx.mwn()).rawRequest({ url: 'https://test.wiki/w/api.php' });
+		await (await ctx.mwnFor('w')).rawRequest({ url: 'https://test.wiki/w/api.php' });
 
 		// Startup reconciliation, the wiki resources and the readiness probe reach
 		// the wiki with no MCP request around them.
 		expect(calls[0]?.signal).toBeDefined();
+	});
+
+	it('asks the wiki for the bot right once across calls on the same instance', async () => {
+		const wiki = writingWiki({}, { rights: ['bot'] });
+		const ctx = contextHandingOut(() => wiki.mwn);
+
+		await botRightInOneCall(ctx);
+		await botRightInOneCall(ctx);
+
+		expect(wiki.rightsQueries()).toBe(1);
+	});
+
+	it('asks for the bot right again on each new instance', async () => {
+		const first = writingWiki({}, { rights: ['bot'] });
+		const second = writingWiki({}, { rights: [] });
+		const instances = [first.mwn, second.mwn];
+		const ctx = contextHandingOut(() => instances.shift());
+
+		await botRightInOneCall(ctx);
+
+		await expect(botRightInOneCall(ctx)).resolves.toBe(false);
 	});
 });

@@ -1,24 +1,28 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn, type MockMwn } from '../../../helpers/mock-mwn.ts';
-import { fakeContext, withoutEditAttribution } from '../../../helpers/fakeContext.ts';
+import { withoutEditAttribution, contextOn } from '../../../helpers/fakeContext.ts';
 import type { ToolContext } from '../../../../src/runtime/context.ts';
 import { neowikiUpdateSubject } from '../../../../src/tools/extensions/neowiki/neowiki-update-subject.ts';
 import { assertStructuredError } from '../../../helpers/structuredResult.ts';
-
-function httpError(status: number, data: unknown): Error & { response: unknown } {
-	const err = new Error(`HTTP ${status}`) as Error & { response: unknown };
-	err.response = { status, data };
-	return err;
-}
+import { httpError } from '../../../helpers/httpError.ts';
+import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 
 const stmts = { Founded: { propertyType: 'number', value: 2019 } };
 
-function contextWith(): { mock: MockMwn; ctx: ToolContext } {
+const birth = {
+	id: 's1demo6sssssss1',
+	schema: 'Birth',
+	statements: { Year: { propertyType: 'number', value: 1881 } },
+};
+
+const updated = { status: 'updated', subjectId: 's1demo' };
+
+function contextWith(data: unknown): { mock: MockMwn; ctx: ToolContext } {
 	const mock = createMockMwn({
 		getCsrfToken: vi.fn().mockResolvedValue('tok'),
-		rawRequest: vi.fn().mockResolvedValue({ data: { status: 'updated', subjectId: 's1demo' } }),
+		rawRequest: vi.fn().mockResolvedValue({ data }),
 	});
-	return { mock, ctx: fakeContext({ mwn: async () => mock as never }) };
+	return { mock, ctx: contextOn(mock) };
 }
 
 function sentBody(mock: MockMwn): Record<string, unknown> {
@@ -33,7 +37,7 @@ describe('neowiki-update-subject', () => {
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockResolvedValue({ data: { status: 'updated', subjectId: 's1demo' } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		const result = await neowikiUpdateSubject.handle(
 			{ id: 's1demo', label: 'ACME', statements: stmts, comment: 'tidy' },
 			ctx,
@@ -52,7 +56,7 @@ describe('neowiki-update-subject', () => {
 	});
 
 	it('attributes the write to the tool that made it, after the caller comment', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(updated);
 
 		await neowikiUpdateSubject.handle(
 			{ id: 's1demo', label: 'ACME', statements: stmts, comment: 'tidy' },
@@ -67,7 +71,7 @@ describe('neowiki-update-subject', () => {
 	});
 
 	it('attributes a write the caller gave no comment for', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(updated);
 
 		await neowikiUpdateSubject.handle({ id: 's1demo', label: 'ACME', statements: stmts }, ctx);
 
@@ -77,7 +81,7 @@ describe('neowiki-update-subject', () => {
 	});
 
 	it('drops the attribution for a wiki that opts out of it', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(updated);
 
 		await neowikiUpdateSubject.handle(
 			{ id: 's1demo', label: 'ACME', statements: stmts, comment: 'tidy' },
@@ -88,7 +92,7 @@ describe('neowiki-update-subject', () => {
 	});
 
 	it('sends no comment at all when a wiki opts out and the caller gave none', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(updated);
 
 		await neowikiUpdateSubject.handle(
 			{ id: 's1demo', label: 'ACME', statements: stmts },
@@ -98,13 +102,69 @@ describe('neowiki-update-subject', () => {
 		expect(sentBody(mock)).not.toHaveProperty('comment');
 	});
 
+	it('writes dependent subjects in the same request', async () => {
+		const { mock, ctx } = contextWith(updated);
+
+		await neowikiUpdateSubject.handle(
+			{ id: 's1demo', statements: stmts, dependentSubjects: [birth] },
+			ctx,
+		);
+
+		expect(sentBody(mock)).toMatchObject({ dependentSubjects: [birth] });
+	});
+
+	it('takes back the empty label a read returns for a subject without one', () => {
+		expect(neowikiUpdateSubject.inputSchema.label.safeParse('').success).toBe(true);
+	});
+
+	it('omits the label when none is given, which clears it', async () => {
+		const { mock, ctx } = contextWith(updated);
+
+		await neowikiUpdateSubject.handle({ id: 's1demo', statements: stmts }, ctx);
+
+		expect(sentBody(mock)).not.toHaveProperty('label');
+	});
+
+	it('returns the violations the write reported and the subject as saved', async () => {
+		const violation = {
+			propertyName: 'Founded',
+			code: 'max-value',
+			args: [2000],
+			severity: 'warning',
+		};
+		const { ctx } = contextWith({
+			status: 'updated',
+			subjectId: 's1demo',
+			violations: [violation],
+			subject: {
+				id: 's1demo',
+				label: 'ACME',
+				displayName: 'ACME',
+				schema: 'Company',
+				statements: { Founded: { propertyType: 'number', value: 2019 } },
+			},
+		});
+		const result = await neowikiUpdateSubject.handle(
+			{ id: 's1demo', label: 'ACME', statements: stmts },
+			ctx,
+		);
+
+		expect(result.structuredContent).toMatchObject({
+			violations: [violation],
+			subject: { statements: [{ property: 'Founded', type: 'number', value: 2019 }] },
+		});
+	});
+
 	it('maps a 404 to not_found', async () => {
 		const mock = createMockMwn({
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockRejectedValue(httpError(404, { status: 'error', message: 'gone' })),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
-		const result = await neowikiUpdateSubject.handle({ id: 'sX', label: 'X', statements: {} }, ctx);
+		const ctx = contextOn(mock);
+		const result = await dispatch(
+			neowikiUpdateSubject,
+			ctx,
+		)({ id: 'sX', label: 'X', statements: {} });
 		assertStructuredError(result, 'not_found');
 	});
 });

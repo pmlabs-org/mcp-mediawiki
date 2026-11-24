@@ -1,13 +1,16 @@
+import { createReadStream, type ReadStream } from 'node:fs';
+import { basename } from 'node:path';
 import type { ApiParams, Mwn } from 'mwn';
 import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
-import type { ActiveWiki } from '../wikis/activeWiki.ts';
+import type { WikiConfig } from '../config/loadConfig.ts';
+import { instanceBehind } from '../wikis/abortableMwn.ts';
 
 export interface EditService {
 	/** Wraps mwn.request with CSRF + tag injection + formatversion=2. For action:edit and similar. */
 	submit(mwn: Mwn, params: Record<string, unknown>): Promise<unknown>;
 
-	/** Wraps mwn.upload with tag injection. CSRF is handled inside mwn.upload. */
+	/** Uploads the file at `filepath` via a multipart action=upload. Injects CSRF token, tags, and ignorewarnings. */
 	submitUpload(
 		mwn: Mwn,
 		filepath: string,
@@ -26,30 +29,30 @@ export interface EditService {
 		params: ApiUploadParams,
 	): Promise<ApiUploadResponse>;
 
-	/** Pure helper: returns options with tags injected from the targeted wiki's config. Used by mwn.create/delete/undelete callers. */
-	applyTags<T extends Record<string, unknown>>(options: T): T;
-
 	/**
 	 * Reports whether the authenticated account holds the `bot` right on the
 	 * targeted wiki — i.e. whether a bot-flagged edit will actually be marked.
 	 * Resolves undefined when the rights probe fails; a probe failure never
-	 * blocks a write. The probe is cached per Mwn instance; sessions that
-	 * authenticate with a per-request bearer token get a fresh Mwn per call,
-	 * so the probe re-runs for each bot-flagged edit there.
+	 * blocks a write. The probe is cached per Mwn instance, across calls and
+	 * the bounded views of it; sessions that authenticate with a per-request
+	 * bearer token get a fresh Mwn per call, so the probe re-runs for each
+	 * bot-flagged edit there.
 	 */
 	botRight(mwn: Mwn): Promise<boolean | undefined>;
 }
 
-export class EditServiceImpl implements EditService {
-	public constructor(private readonly activeWiki: ActiveWiki) {}
+// Outside the class: an edit service is built per call.
+const botRightCache = new WeakMap<Mwn, Promise<boolean>>();
 
-	private readonly botRightCache = new WeakMap<Mwn, Promise<boolean>>();
+export class EditServiceImpl implements EditService {
+	public constructor(private readonly tags: WikiConfig['tags']) {}
 
 	public async botRight(mwn: Mwn): Promise<boolean | undefined> {
-		let pending = this.botRightCache.get(mwn);
+		const instance = instanceBehind(mwn);
+		let pending = botRightCache.get(instance);
 		if (!pending) {
 			pending = this.queryBotRight(mwn);
-			this.botRightCache.set(mwn, pending);
+			botRightCache.set(instance, pending);
 		}
 		try {
 			return await pending;
@@ -58,8 +61,8 @@ export class EditServiceImpl implements EditService {
 			// of pinning the failure for the lifetime of the Mwn instance. The
 			// identity check keeps a late rejection from evicting a newer probe
 			// that another caller has already reseeded.
-			if (this.botRightCache.get(mwn) === pending) {
-				this.botRightCache.delete(mwn);
+			if (botRightCache.get(instance) === pending) {
+				botRightCache.delete(instance);
 			}
 			return undefined;
 		}
@@ -78,7 +81,7 @@ export class EditServiceImpl implements EditService {
 
 	public async submit(mwn: Mwn, params: Record<string, unknown>): Promise<unknown> {
 		const token = await mwn.getCsrfToken();
-		const tags = this.activeWiki.get().config.tags;
+		const { tags } = this;
 		const fullParams: Record<string, unknown> = { ...params, token, formatversion: '2' };
 		if (tags !== null && tags !== undefined) {
 			fullParams.tags = tags;
@@ -94,12 +97,7 @@ export class EditServiceImpl implements EditService {
 		text: string,
 		params: ApiUploadParams,
 	): Promise<ApiUploadResponse> {
-		const tags = this.activeWiki.get().config.tags;
-		const fullParams: ApiUploadParams = { ...params };
-		if (tags !== null && tags !== undefined) {
-			fullParams.tags = tags;
-		}
-		return mwn.upload(filepath, title, text, fullParams);
+		return this.upload(mwn, fileAt(filepath), title, text, params);
 	}
 
 	public async submitUploadFromBytes(
@@ -110,14 +108,21 @@ export class EditServiceImpl implements EditService {
 		text: string,
 		params: ApiUploadParams,
 	): Promise<ApiUploadResponse> {
+		return this.upload(mwn, { stream: data, name: filename }, title, text, params);
+	}
+
+	private async upload(
+		mwn: Mwn,
+		file: FileField,
+		title: string,
+		text: string,
+		params: ApiUploadParams,
+	): Promise<ApiUploadResponse> {
 		const token = await mwn.getCsrfToken();
-		const tags = this.activeWiki.get().config.tags;
-		// Pass the Buffer straight to mwn's multipart `file` field. form-data sizes
-		// a Buffer directly; a Readable (e.g. Readable.from(buffer)) has no known
-		// length and form-data rejects it with "Unknown stream".
+		const { tags } = this;
 		const fullParams: Record<string, unknown> = {
 			action: 'upload',
-			file: { stream: data, name: filename },
+			file,
 			filename: title,
 			text,
 			ignorewarnings: true,
@@ -133,12 +138,26 @@ export class EditServiceImpl implements EditService {
 		})) as { upload: ApiUploadResponse };
 		return response.upload;
 	}
+}
 
-	public applyTags<T extends Record<string, unknown>>(options: T): T {
-		const tags = this.activeWiki.get().config.tags;
-		if (tags === null || tags === undefined) {
-			return { ...options };
-		}
-		return { ...options, tags };
-	}
+/** mwn's multipart `file` field. */
+interface FileField {
+	readonly stream: Buffer | ReadStream;
+	readonly name: string;
+}
+
+// mwn resends the same params when it retries a request, reading `stream` once
+// per attempt, and a read stream is spent by the attempt that read it: a retry
+// would declare the file's length and send none of it. So each read opens the
+// file afresh, closing what a dropped attempt left half read.
+function fileAt(filepath: string): FileField {
+	let opened: ReadStream | undefined;
+	return {
+		get stream(): ReadStream {
+			opened?.destroy();
+			opened = createReadStream(filepath);
+			return opened;
+		},
+		name: basename(filepath),
+	};
 }

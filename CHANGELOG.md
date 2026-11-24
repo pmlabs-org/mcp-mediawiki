@@ -6,9 +6,86 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 ## [Unreleased]
 
+## [0.21.0] - 2026-11-05
+
+### Breaking changes
+
+- The server now needs Node.js 22.19 or later (was 22.12). On Node.js 22.12–22.18 it fails at startup.
+- `update-page` now refuses a `section=N` replace whose source does not begin with a heading, and quotes the heading to keep. Empty sources, appends, prepends, `find-replace`, the lead and full-page replaces are exempt.
+
+### Added
+
+- `get-random-pages` tool that returns a random sample of wiki pages from one namespace, as Special:Random does for readers. It excludes redirects by default.
+- `wikibase-edit-entity` and `wikibase-add-statement` accept a `bot` parameter that marks the edit as a bot edit, and report `botMarked`, as `create-page` and `update-page` do.
+- A per-wiki `bot` setting marks the edits of `create-page`, `update-page`, `wikibase-edit-entity` and `wikibase-add-statement` as bot edits unless the call passes `bot: false`. Without it, nothing changes. See [docs/configuration.md](docs/configuration.md#bot-edits-bot).
+
+### Changed
+
+- The Docker image runs on Node.js 26 (was 24).
+
+## [0.20.1] - 2026-10-29
+
+### Security
+
+- Updated the Docker image to Node.js 24.22.2 and updated dependencies to resolve known advisories, among them high-severity issues in how the HTTP transport decompresses and parses request bodies, which let an unauthenticated client crash the server or possibly run code in it. If you run the server from npm, update Node.js to 22.23.4, 24.22.1, 26.12.1 or later.
+
+## [0.20.0] - 2026-10-22
+
+### Breaking changes
+
+- The NeoWiki tools now need NeoWiki from 2026-09-19 or later. On an earlier NeoWiki, `neowiki-validate-subject` fails before 2026-08-25, `neowiki-create-subject` fails before 2026-09-14 for a subject that is not the page's main subject (ProfessionalWiki/NeoWiki#1422), and `neowiki-search-subjects` needs a schema before 2026-09-19.
+
+### Added
+
+- `neowiki-create-subject` and `neowiki-update-subject` take `dependentSubjects`, which writes Dependent Subjects in the same revision as the subject pointing at them. Their IDs come from the new `neowiki-mint-subject-ids` tool. `dependentSubjects` needs NeoWiki with ProfessionalWiki/NeoWiki#1673 (2026-10-15) or later.
+
+### Changed
+
+- The NeoWiki tool descriptions now describe relations as https://github.com/ProfessionalWiki/NeoWiki/pull/1633 changed them. On a NeoWiki without that change, Cypher queries written from them miss relation edges, so upgrade NeoWiki and the server together.
+- `neowiki-create-subject` and `neowiki-update-subject` return the violations a subject was saved with, and the subject as saved. Their label is optional: omitting it, or passing an empty one, creates a subject without one, or clears it. `neowiki-validate-subject` no longer takes a label, which NeoWiki ignores.
+- The NeoWiki read tools return a subject's display name and, for a Dependent Subject, the subject it belongs to; `neowiki-get-subject` also returns the page holding it. `neowiki-search-subjects` searches every schema when none is given, and returns each match's page title. `neowiki-get-schema` and `neowiki-list-schemas` mark a schema whose subjects are dependent.
+- The NeoWiki tool descriptions cover monolingual text values, Dependent Subjects, and the current graph model, including whole nodes, which Cypher queries can now return.
+- Failure messages from the NeoWiki tools and `wikibase-query` now start with "Failed to <action>:", as other tools' do. The server logs these failures as `Tool failed`, and tool-call telemetry records the HTTP status the service answered with.
+- `cargo-query`, `smw-query` and `bucket-query` stop at the content byte budget, 75000 bytes by default (`MCP_CONTENT_MAX_BYTES`): they return the whole rows that fit, and continueFrom resumes at the first row left out. A row larger than the budget on its own is left out, and the truncation marker says how to narrow or skip it.
+- The requests the server makes itself (probing a wiki, discovering one for `add-wiki`, fetching a file for the from-URL upload tools, Wikibase SPARQL queries, client metadata documents for the hosted sign-in) refuse the ports the Fetch standard blocks, such as 6000, 6665–6669 and 10080. A wiki on one of those ports still answers tool calls, but its probe fails, so its extension tools are not offered.
+- Links in tool results take a wiki's public address from the same siteinfo check that decides its extension tools. A wiki on an internal host needs the host in `MCP_TRUSTED_HOSTS` for public links, as it already did for its extension tools. A wiki slower than 5 seconds to answer, rather than 30, gets links from its configured server until a check a minute later succeeds.
+
 ### Fixed
 
 - `move-page` now reports `redirectCreated: false` when no redirect was left at the old title, instead of always reporting `true`.
+- `neowiki-create-subject` creates a subject that is not the page's main subject again, instead of failing as not found.
+- `neowiki-list-schemas` pages through every schema again. Against NeoWiki from 2026-07-24 on, it returned only the first 50, and continueFrom returned the same page.
+- `neowiki-search-subjects` returns up to 50 matches instead of 10, and marks a full result as capped.
+- The NeoWiki write tools now describe the `dateTime` property type by its name. A statement written as `datetime`, as they described it before, was stored under a type NeoWiki does not know and flagged as a type mismatch.
+- A NeoWiki write refused for its violations now fails as `invalid_input` and lists the violations, instead of `upstream_failure`. A NeoWiki read refused because the wiki requires login to read now fails as `permission_denied` instead of `invalid_input`.
+- Page URLs in tool results no longer contain a literal `$1`, as in `/index.php?title=$1/Main_Page`, on a wiki whose `$wgArticlePath` puts the title in a query string.
+- Page URLs for titles containing `?` now link to the page instead of to the title cut off at the `?`.
+- OAuth tokens saved at the same moment on stdio, such as two wikis refreshing at once, are all kept. Before, one could be lost, forcing a new browser sign-in, or the save failed.
+- `create-page` marks a page creation as a bot edit only when `bot` is set.
+- `list-wikis` no longer starts an OAuth sign-in on stdio when the default wiki uses OAuth.
+- `get-pages` with `followRedirects: false` returns a page asked for by a non-canonical title, such as `main_Page`, instead of reporting it missing.
+- `get-pages` fails with the wiki's error when the wiki refuses the read, instead of reporting every page missing.
+- `upload-file` and `upload-file-from-url` fail as `conflict` when a file with the target title already exists, instead of uploading a new version over it.
+- `get-page` and `update-page`'s `find-replace` fail with the wiki's error when the wiki refuses the read, such as `permission_denied`, instead of an `upstream_failure` naming a JavaScript error.
+- `create-page` fails when the wiki refuses the creation without an error code, as it does for a CAPTCHA, instead of reporting success.
+- With hosted OAuth sign-in, a user's wiki token is sent only to the wiki sign-in is set up for.
+- With hosted OAuth sign-in, a write to a wiki other than the one sign-in covers fails as `permission_denied`, naming that wiki, instead of asking the caller to authenticate.
+- Hosted OAuth sign-in signs users out when the default wiki changes, instead of sending their token for the previous wiki to the new one. Sessions started before this release are not affected.
+- On stdio, a wiki whose configuration now points at a different OAuth issuer asks for a new sign-in instead of reusing the token stored under its key. Tokens stored before this release are not affected.
+- A wiki error whose code is a JavaScript built-in name, such as `constructor`, is reported as `upstream_failure` instead of as an error with no category.
+- `compare-pages` names the page that does not exist, instead of reporting only "Page not found".
+- `cargo-query` and `cargo-describe-table` report a query or table that Cargo refuses as `invalid_input`, with Cargo's reason and a hint, instead of `upstream_failure`.
+- `upload-file` and `upload-file-from-url` refuse to upload over an existing file whose title spells the File prefix another way, such as `Datei:` on a German wiki, `Image:` or `file:`, instead of overwriting it. With such a title, `get-file` and `get-file-data` find the file instead of reporting it missing, and `update-file` and `update-file-from-url` update it instead of refusing it as missing.
+- `get-file` and `get-file-data` return a file the wiki serves from a shared repository, such as Commons on Wikipedia or a wiki using InstantCommons, instead of reporting it missing.
+- `smw-query` and `smw-list-properties` refuse a `continueFrom` that is not a non-negative integer as `invalid_input`, instead of silently returning the first page again.
+- The server now offers the extension tools on a wiki that keeps anonymous users from reading, when the wiki has credentials in `config.json`, instead of hiding them. A wiki reached only through OAuth sign-in still gets none.
+- `get-site-info` lists a wiki's extensions even when the server cannot check them itself, as on a private wiki reached only through OAuth sign-in.
+- `upload-file` and `update-file` no longer time out when an upload is retried, as after a lost bot-password session: the retry sends the whole file instead of none of it. A call without credentials, which was retried every time, now fails at once.
+- `list-wikis`, `add-wiki`, `remove-wiki`, `oauth-status` and `oauth-logout` work when `defaultWiki` names no configured wiki, instead of failing with "not found in registry".
+
+### Security
+
+- Updated dependencies to resolve known advisories, among them high-severity issues in the HTTP client that carries every wiki request and in its redirect handling. The server now requires `@modelcontextprotocol/server` 2.3.0 or later.
 
 ## [0.19.0] - 2026-09-25
 
@@ -389,7 +466,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) 
 
 - Smithery integration.
 
-[Unreleased]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.19.0...HEAD
+[Unreleased]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.21.0...HEAD
+[0.21.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.20.1...v0.21.0
+[0.20.1]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.20.0...v0.20.1
+[0.20.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.19.0...v0.20.0
 [0.19.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.18.0...v0.19.0
 [0.18.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.17.0...v0.18.0
 [0.17.0]: https://github.com/ProfessionalWiki/MediaWiki-MCP-Server/compare/v0.16.0...v0.17.0

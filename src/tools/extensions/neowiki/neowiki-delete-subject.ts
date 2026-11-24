@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { Tool } from '../../../runtime/tool.ts';
 import type { ToolContext } from '../../../runtime/context.ts';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
+import { neowikiRequest } from './neowikiRequest.ts';
 import { formatEditComment } from '../../../wikis/utils.ts';
 
 const inputSchema = {
@@ -16,7 +16,7 @@ const inputSchema = {
 export const neowikiDeleteSubject: Tool<typeof inputSchema> = {
 	name: 'neowiki-delete-subject',
 	description:
-		'Deletes one NeoWiki Subject by ID from its page. Enabled only when the wiki has NeoWiki installed. Requires the edit right. Pre-1.0: the NeoWiki API may change without notice.',
+		'Deletes one NeoWiki Subject by ID from its page, together with its Dependent Subjects. Enabled only when the wiki has NeoWiki installed. Relations that other Subjects hold to a standalone Subject stay, pointing at a Subject that no longer exists; deleting a Dependent Subject removes the relations to it, editing its Host Subject. Requires the edit right. Pre-1.0: the NeoWiki API may change without notice.',
 	inputSchema,
 	annotations: {
 		title: 'Delete NeoWiki subject',
@@ -31,18 +31,14 @@ export const neowikiDeleteSubject: Tool<typeof inputSchema> = {
 	async handle({ id, comment }, ctx: ToolContext): Promise<CallToolResult> {
 		const mwn = await ctx.mwn();
 		const editComment = formatEditComment(ctx, 'neowiki-delete-subject', comment);
-		try {
-			// The endpoint returns an empty 200 body on success; ignore it.
-			await neowikiRequest(mwn, {
-				method: 'DELETE',
-				path: `/subject/${encodeURIComponent(id)}`,
-				csrf: true,
-				...(editComment !== undefined ? { body: { comment: editComment } } : {}),
-			});
+		// The endpoint returns an empty 200 body on success; ignore it.
+		await neowikiRequest(mwn, {
+			method: 'DELETE',
+			path: `/subject/${encodeURIComponent(id)}`,
+			csrf: true,
+			...(editComment !== undefined ? { body: { comment: editComment } } : {}),
+		});
 
-			return ctx.format.ok({ subjectId: id, status: 'deleted' });
-		} catch (err) {
-			return neowikiErrorResult(err, ctx);
-		}
+		return ctx.format.ok({ subjectId: id, status: 'deleted' });
 	},
 };

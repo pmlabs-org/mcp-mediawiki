@@ -1,10 +1,10 @@
 import type express from 'express';
-import { recordReadyFailure } from '../runtime/metrics.ts';
+import type { Metrics } from '../runtime/metrics.ts';
 import { monotonicNow } from '../runtime/clock.ts';
 import type { MwnProvider } from '../wikis/mwnProvider.ts';
-import type { ActiveWiki } from '../wikis/activeWiki.ts';
 import { withCallBounds } from '../wikis/abortableMwn.ts';
 import { callDeadline } from '../runtime/callDeadline.ts';
+import { errorMessage } from '../errors/errorMessage.ts';
 
 interface ReadyCacheEntry {
 	expiresAt: number;
@@ -15,21 +15,11 @@ interface ReadyCacheEntry {
 const READY_CACHE_TTL_MS = 5_000;
 // Exported so the probe tests can size their fixtures against the real budget.
 export const READY_PROBE_TIMEOUT_MS = 3_000;
-let readyCache: ReadyCacheEntry | null = null;
-// The probe currently running, shared by every request that arrives while it is
-// still going. The cache alone cannot do this: it only fills once a probe
-// finishes, which is the whole window a slow wiki spends in.
-let readyProbeInFlight: Promise<ReadyCacheEntry> | null = null;
-
-export function __resetReadyCacheForTesting(): void {
-	readyCache = null;
-	readyProbeInFlight = null;
-}
 
 // Both halves of the check as one promise, so the race spans the whole of it:
 // resolving the provider can log in, which alone can outlast the budget.
-async function probeSiteInfo(mwnProvider: MwnProvider): Promise<void> {
-	const mwn = await mwnProvider.get();
+async function probeSiteInfo(mwnProvider: MwnProvider, wiki: string): Promise<void> {
+	const mwn = await mwnProvider.get(wiki);
 	// The race below stops the caller waiting; this stops the probe, which would
 	// otherwise keep retrying long after /ready replied and accumulate under
 	// polling.
@@ -41,11 +31,7 @@ async function probeSiteInfo(mwnProvider: MwnProvider): Promise<void> {
 	});
 }
 
-async function probeDefaultWiki(
-	activeWiki: ActiveWiki,
-	mwnProvider: MwnProvider,
-): Promise<ReadyCacheEntry> {
-	const wiki = activeWiki.getDefaultKey();
+async function probeDefaultWiki(wiki: string, mwnProvider: MwnProvider): Promise<ReadyCacheEntry> {
 	const checkedAt = new Date().toISOString();
 	// Resolves rather than rejects, so arming it before the race cannot orphan a
 	// rejection.
@@ -56,7 +42,7 @@ async function probeDefaultWiki(
 	});
 
 	try {
-		const outcome = await Promise.race([probeSiteInfo(mwnProvider), deadline]);
+		const outcome = await Promise.race([probeSiteInfo(mwnProvider, wiki), deadline]);
 		if (outcome === timedOut) {
 			throw new Error(`probe timeout after ${READY_PROBE_TIMEOUT_MS}ms`);
 		}
@@ -66,7 +52,7 @@ async function probeDefaultWiki(
 			httpStatus: 200,
 		};
 	} catch (err) {
-		const reason = err instanceof Error ? err.message : String(err);
+		const reason = errorMessage(err);
 		return {
 			expiresAt: monotonicNow() + READY_CACHE_TTL_MS,
 			payload: { status: 'not_ready', wiki, reason, checked_at: checkedAt },
@@ -86,17 +72,24 @@ export const __probeDefaultWikiForTesting = probeDefaultWiki;
 export function mountReadyEndpoint(
 	app: express.Express,
 	deps: {
-		activeWiki: ActiveWiki;
+		defaultWikiKey: string;
 		mwnProvider: MwnProvider;
+		metrics: Metrics;
 	},
 ): void {
+	let readyCache: ReadyCacheEntry | null = null;
+	// The probe currently running, shared by every request that arrives while it is
+	// still going. The cache alone cannot do this: it only fills once a probe
+	// finishes, which is the whole window a slow wiki spends in.
+	let readyProbeInFlight: Promise<ReadyCacheEntry> | null = null;
+
 	app.get('/ready', async (_req, res) => {
 		let entry = readyCache;
 		if (!entry || monotonicNow() >= entry.expiresAt) {
 			if (readyProbeInFlight) {
 				entry = await readyProbeInFlight;
 			} else {
-				const probe = probeDefaultWiki(deps.activeWiki, deps.mwnProvider);
+				const probe = probeDefaultWiki(deps.defaultWikiKey, deps.mwnProvider);
 				readyProbeInFlight = probe;
 				try {
 					entry = await probe;
@@ -112,7 +105,7 @@ export function mountReadyEndpoint(
 				// that merely waited on this probe — K8s readiness probes that fire
 				// every second would otherwise inflate the counter for one outage.
 				if (entry.httpStatus !== 200) {
-					recordReadyFailure();
+					deps.metrics.recordReadyFailure();
 				}
 			}
 		}

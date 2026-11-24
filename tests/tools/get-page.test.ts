@@ -1,17 +1,45 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn } from '../helpers/mock-mwn.ts';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { fakeContext, probeReporting, contextOn } from '../helpers/fakeContext.ts';
+import { wikiAnswering } from '../helpers/wikiAnswering.ts';
 import { getPage } from '../../src/tools/get-page.ts';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import { ContentFormat } from '../../src/results/contentFormat.ts';
 import { SectionServiceImpl } from '../../src/services/sectionService.ts';
 import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
-import { SiteInfoCacheImpl } from '../../src/wikis/siteInfoCache.ts';
+
+type MockMwn = ReturnType<typeof createMockMwn>;
+
+interface WikiContent {
+	page: object;
+	sections?: object[];
+	html?: string;
+}
+
+// A wiki holding `page`, answering the page read with it, a section listing
+// with `sections`, and a render with `html`.
+function wikiHolding({ page, sections = [], html }: WikiContent): MockMwn {
+	return createMockMwn({
+		request: vi.fn(async (params: { action?: string; prop?: string }) => {
+			if (params.action === 'query') {
+				return { query: { pages: [page] } };
+			}
+			return params.prop === 'sections' ? { parse: { sections } } : { parse: { text: html } };
+		}),
+	});
+}
+
+// The page reads the wiki received, in order.
+function pageReads(mock: MockMwn): Record<string, unknown>[] {
+	return mock.request.mock.calls
+		.map(([params]) => params as Record<string, unknown>)
+		.filter((params) => params.action === 'query');
+}
 
 describe('get-page', () => {
-	it('returns page source using mwn.read()', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+	it('returns page source', async () => {
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [
@@ -22,9 +50,9 @@ describe('get-page', () => {
 						content: 'Hello world',
 					},
 				],
-			}),
+			},
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -39,7 +67,7 @@ describe('get-page', () => {
 		expect(text).toContain('Source: Hello world');
 		expect(text).not.toContain('Page ID:');
 		expect(text).not.toContain('Title:');
-		expect(mock.read).toHaveBeenCalledWith('Test Page', expect.any(Object));
+		expect(pageReads(mock)).toEqual([expect.objectContaining({ titles: 'Test Page' })]);
 	});
 
 	it('returns HTML using action=parse', async () => {
@@ -48,7 +76,7 @@ describe('get-page', () => {
 				parse: { text: '<p>Hello</p>' },
 			}),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -64,8 +92,8 @@ describe('get-page', () => {
 	});
 
 	it('returns metadata without content for ContentFormat.none', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [
@@ -75,11 +103,9 @@ describe('get-page', () => {
 						contentmodel: 'wikitext',
 					},
 				],
-			}),
-			request: vi.fn().mockResolvedValue({ parse: { sections: [] } }),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -102,14 +128,14 @@ describe('get-page', () => {
 	});
 
 	it('returns error when page is missing', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 0,
 				title: 'Missing Page',
 				missing: true,
-			}),
+			},
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -125,8 +151,8 @@ describe('get-page', () => {
 	});
 
 	it('returns both metadata and source when both requested', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [
@@ -137,11 +163,9 @@ describe('get-page', () => {
 						content: 'Hello world',
 					},
 				],
-			}),
-			request: vi.fn().mockResolvedValue({ parse: { sections: [] } }),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -161,9 +185,9 @@ describe('get-page', () => {
 
 	it('returns error on mwn failure via dispatcher', async () => {
 		const mock = createMockMwn({
-			read: vi.fn().mockRejectedValue(new Error('API error')),
+			request: vi.fn().mockRejectedValue(new Error('API error')),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await dispatch(
 			getPage,
@@ -178,21 +202,35 @@ describe('get-page', () => {
 		expect(envelope.message).toContain('API error');
 	});
 
-	it('forwards section as rvsection for source content', async () => {
-		const read = vi.fn().mockResolvedValue({
-			pageid: 1,
-			title: 'Test Page',
-			revisions: [
-				{
-					revid: 42,
-					timestamp: '2026-01-01T00:00:00Z',
-					contentmodel: 'wikitext',
-					content: 'Section body',
-				},
-			],
+	it("fails with the wiki's refusal when the read is refused", async () => {
+		const wiki = wikiAnswering({
+			error: { code: 'readapidenied', info: 'You need read permission to use this module.' },
 		});
-		const mock = createMockMwn({ read });
-		const ctx = fakeContext({ mwn: async () => mock as never });
+
+		const result = await dispatch(
+			getPage,
+			contextOn(wiki.mwn),
+		)({ title: 'Test Page', content: ContentFormat.source, metadata: false });
+
+		assertStructuredError(result, 'permission_denied', 'readapidenied');
+	});
+
+	it('forwards section as rvsection for source content', async () => {
+		const mock = wikiHolding({
+			page: {
+				pageid: 1,
+				title: 'Test Page',
+				revisions: [
+					{
+						revid: 42,
+						timestamp: '2026-01-01T00:00:00Z',
+						contentmodel: 'wikitext',
+						content: 'Section body',
+					},
+				],
+			},
+		});
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -206,12 +244,7 @@ describe('get-page', () => {
 
 		const text = assertStructuredSuccess(result);
 		expect(text).toContain('Source: Section body');
-		expect(read).toHaveBeenCalledWith(
-			'Test Page',
-			expect.objectContaining({
-				rvsection: 2,
-			}),
-		);
+		expect(pageReads(mock)).toEqual([expect.objectContaining({ rvsection: 2 })]);
 	});
 
 	it('forwards section as parse section for html content', async () => {
@@ -219,7 +252,7 @@ describe('get-page', () => {
 			parse: { text: '<p>Section HTML</p>' },
 		});
 		const mock = createMockMwn({ request });
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -260,25 +293,23 @@ describe('get-page', () => {
 	});
 
 	it('reports the full-page size in metadata even when section is set', async () => {
-		const read = vi.fn().mockResolvedValue({
-			pageid: 1,
-			title: 'Test Page',
-			revisions: [
-				{
-					revid: 42,
-					timestamp: '2026-01-01T00:00:00Z',
-					contentmodel: 'wikitext',
-					size: 98765,
-					content: 'Section body',
-				},
-			],
+		const mock = wikiHolding({
+			page: {
+				pageid: 1,
+				title: 'Test Page',
+				revisions: [
+					{
+						revid: 42,
+						timestamp: '2026-01-01T00:00:00Z',
+						contentmodel: 'wikitext',
+						size: 98765,
+						content: 'Section body',
+					},
+				],
+			},
+			sections: [{ line: 'History' }],
 		});
-		const request = vi.fn().mockResolvedValue({
-			parse: { sections: [{ line: 'History' }] },
-		});
-		const mock = createMockMwn({ read, request });
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -294,17 +325,12 @@ describe('get-page', () => {
 
 		const text = assertStructuredSuccess(result);
 		expect(text).toContain('Size: 98765');
-		expect(read).toHaveBeenCalledWith(
-			'Test Page',
-			expect.objectContaining({
-				rvsection: 1,
-			}),
-		);
+		expect(pageReads(mock)).toEqual([expect.objectContaining({ rvsection: 1 })]);
 	});
 
 	it('omits size from metadata when the revision has no size field', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'No Size',
 				revisions: [
@@ -314,11 +340,9 @@ describe('get-page', () => {
 						contentmodel: 'wikitext',
 					},
 				],
-			}),
-			request: vi.fn().mockResolvedValue({ parse: { sections: [] } }),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -336,8 +360,8 @@ describe('get-page', () => {
 	});
 
 	it('metadata=true includes size and sections array (lead slot is empty string)', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [
@@ -348,18 +372,13 @@ describe('get-page', () => {
 						size: 12345,
 					},
 				],
-			}),
-			request: vi.fn().mockResolvedValue({
-				parse: {
-					sections: [
-						{ line: 'History', number: '1', index: '1' },
-						{ line: 'Background', number: '2', index: '2' },
-					],
-				},
-			}),
+			},
+			sections: [
+				{ line: 'History', number: '1', index: '1' },
+				{ line: 'Background', number: '2', index: '2' },
+			],
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -379,8 +398,8 @@ describe('get-page', () => {
 
 	it('attaches content-truncated truncation when source exceeds the byte cap', async () => {
 		const big = 'x'.repeat(75001);
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Big',
 				revisions: [
@@ -391,13 +410,10 @@ describe('get-page', () => {
 						content: big,
 					},
 				],
-			}),
-			request: vi.fn().mockResolvedValue({
-				parse: { sections: [{ line: 'History', index: '1', level: '2' }] },
-			}),
+			},
+			sections: [{ line: 'History', index: '1', level: '2' }],
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -424,8 +440,8 @@ describe('get-page', () => {
 
 	it('omits truncation when source is exactly at the byte cap', async () => {
 		const exact = 'y'.repeat(75000);
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Exact',
 				revisions: [
@@ -436,9 +452,9 @@ describe('get-page', () => {
 						content: exact,
 					},
 				],
-			}),
+			},
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{
@@ -463,8 +479,7 @@ describe('get-page', () => {
 				parse: { sections: [{ line: 'Heading', index: '1', level: '2' }] },
 			});
 		const mock = createMockMwn({ request });
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -498,15 +513,14 @@ describe('get-page', () => {
 			{ index: '3', level: 3, line: 'Modern era', editable: true },
 			{ index: '4', level: 2, line: 'Geography', editable: true },
 		]);
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Big',
 				revisions: [{ revid: 42, contentmodel: 'wikitext', content: 'x'.repeat(75001) }],
-			}),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: { list, listInSource: vi.fn() },
 		});
 
@@ -526,15 +540,14 @@ describe('get-page', () => {
 			{ index: '1', level: 2, line: 'History', editable: true },
 			{ index: '2', level: 2, line: 'Geography', editable: true },
 		]);
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Big',
 				revisions: [{ revid: 42, contentmodel: 'wikitext', content: 'x'.repeat(75001) }],
-			}),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: { list, listInSource: vi.fn() },
 		});
 
@@ -557,15 +570,14 @@ describe('get-page', () => {
 		const list = vi
 			.fn()
 			.mockResolvedValue([{ index: '1', level: 2, line: 'History', editable: true }]);
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Big',
 				revisions: [{ revid: 42, contentmodel: 'wikitext', content: 'x'.repeat(75001) }],
-			}),
+			},
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: { list, listInSource: vi.fn() },
 		});
 
@@ -581,14 +593,14 @@ describe('get-page', () => {
 	// A write scoped to a section needs the revision its number was read from, so
 	// the read that produced the number has to carry it.
 	it('reports the revision ID on a source read without metadata', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [{ revid: 42, contentmodel: 'wikitext', content: '== One ==\nbody' }],
-			}),
+			},
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await getPage.handle(
 			{ title: 'Test Page', content: ContentFormat.source, metadata: false, section: 1 },
@@ -601,21 +613,12 @@ describe('get-page', () => {
 
 	it('builds the page URL from the public siteinfo server, not the configured server', async () => {
 		const mock = createMockMwn({
-			request: vi.fn().mockImplementation((params: { meta?: string; action?: string }) => {
-				if (params.meta === 'siteinfo') {
-					return Promise.resolve({
-						query: { general: { server: 'https://public.example', articlepath: '/wiki/$1' } },
-					});
-				}
-				// action=parse response for html content
-				return Promise.resolve({
-					parse: { text: '<p>Hello</p>', title: 'Test Page', pageid: 1 },
-				});
+			request: vi.fn().mockResolvedValue({
+				parse: { text: '<p>Hello</p>', title: 'Test Page', pageid: 1 },
 			}),
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
-			siteInfoCache: new SiteInfoCacheImpl(),
+		const ctx = contextOn(mock, {
+			wikiProbe: probeReporting({ server: 'https://public.example', articlepath: '/wiki' }),
 		});
 
 		const result = await getPage.handle(
@@ -627,8 +630,8 @@ describe('get-page', () => {
 	});
 
 	it('html+metadata calls read once and returns both metadata and html', async () => {
-		const mock = createMockMwn({
-			read: vi.fn().mockResolvedValue({
+		const mock = wikiHolding({
+			page: {
 				pageid: 1,
 				title: 'Test Page',
 				revisions: [
@@ -638,14 +641,10 @@ describe('get-page', () => {
 						contentmodel: 'wikitext',
 					},
 				],
-			}),
-			request: vi
-				.fn()
-				.mockResolvedValueOnce({ parse: { sections: [] } })
-				.mockResolvedValueOnce({ parse: { text: '<p>Hello</p>' } }),
+			},
+			html: '<p>Hello</p>',
 		});
-		const ctx = fakeContext({
-			mwn: async () => mock as never,
+		const ctx = contextOn(mock, {
 			sections: new SectionServiceImpl(),
 		});
 
@@ -659,7 +658,7 @@ describe('get-page', () => {
 		);
 
 		const text = assertStructuredSuccess(result);
-		expect(mock.read).toHaveBeenCalledTimes(1);
+		expect(pageReads(mock)).toHaveLength(1);
 		expect(text).toContain('Page ID: 1');
 		expect(text).toContain('HTML: <p>Hello</p>');
 	});

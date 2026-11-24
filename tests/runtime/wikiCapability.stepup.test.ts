@@ -1,16 +1,25 @@
 import { describe, it, expect } from 'vitest';
 import { checkWikiCapability } from '../../src/runtime/wikiCapability.ts';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { callWiki, fakeContext } from '../helpers/fakeContext.ts';
+import type { SharedContext } from '../../src/runtime/context.ts';
 import { withRequestFields } from '../../src/runtime/requestContext.ts';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import { assertStructuredError } from '../helpers/structuredResult.ts';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
+import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
 
-const PROXY = {
+function guard(toolName: string, wikiKey: string, ctx: SharedContext) {
+	return checkWikiCapability(toolName, callWiki(ctx, wikiKey), ctx);
+}
+
+const PROXY = fakeProxyConfig({
+	wikiKey: 'w',
 	issuer: 'https://mcp.example/mcp',
 	signingKey: 'k'.repeat(32),
 	tokenExchangeBase: 'http://wiki.svc',
-	scriptpath: '/w',
 	upstreamClientId: 'UP',
-} as unknown as ProxyConfig;
+});
 
 // An OAuth-only wiki (proxy requires oauth2ClientId on the default wiki).
 const oauthWiki = {
@@ -23,8 +32,10 @@ const oauthWiki = {
 
 function ctx(opts: { proxy: boolean; transport?: 'http' | 'stdio' }) {
 	return fakeContext({
-		transport: opts.transport ?? 'http',
-		getProxyConfig: opts.proxy ? () => PROXY : () => null,
+		auth: fakeAuthPolicy({
+			transport: opts.transport ?? 'http',
+			hostedProxy: opts.proxy ? fakeHostedProxy(PROXY, new InMemoryProxyStore()) : null,
+		}),
 		wikis: {
 			getAll: () => ({ w: oauthWiki }) as never,
 			get: (() => oauthWiki) as never,
@@ -33,8 +44,6 @@ function ctx(opts: { proxy: boolean; transport?: 'http' | 'stdio' }) {
 			isManagementAllowed: () => true,
 		},
 		wikiProbe: {
-			hasExtension: (async () => true) as never,
-			hasAnyExtension: (async () => true) as never,
 			invalidate: (() => {}) as never,
 			inspect: (async () => ({ reachable: true, extensions: new Set<string>() })) as never,
 		},
@@ -49,7 +58,7 @@ function messageOf(result: { content?: unknown[] } | undefined): string {
 
 describe('checkWikiCapability proxy step-up', () => {
 	it('rejects a write tool dispatched anonymously on a proxy-enabled wiki with the step-up hint', async () => {
-		const result = await checkWikiCapability('update-page', 'w', ctx({ proxy: true }));
+		const result = await guard('update-page', 'w', ctx({ proxy: true }));
 		expect(result?.isError).toBe(true);
 		const message = messageOf(result);
 		expect(message).toContain('Authentication required to use write tools');
@@ -57,36 +66,52 @@ describe('checkWikiCapability proxy step-up', () => {
 	});
 
 	it('allows a read tool dispatched anonymously on a proxy-enabled wiki', async () => {
-		const result = await checkWikiCapability('get-page', 'w', ctx({ proxy: true }));
+		const result = await guard('get-page', 'w', ctx({ proxy: true }));
 		expect(result).toBeUndefined();
 	});
 
 	it('allows a write tool when a runtime token is present on a proxy-enabled wiki', async () => {
-		const result = await withRequestFields({ runtimeToken: 'upstream-tok' }, () =>
-			checkWikiCapability('update-page', 'w', ctx({ proxy: true })),
+		const result = await withRequestFields(
+			{ runtimeToken: { value: 'upstream-tok', wikiKey: 'w' } },
+			() => guard('update-page', 'w', ctx({ proxy: true })),
 		);
 		expect(result).toBeUndefined();
 	});
 
+	it('refuses a signed-in write on a wiki hosted sign-in does not cover, naming the wiki it does', async () => {
+		const result = await withRequestFields(
+			{ runtimeToken: { value: 'upstream-tok', wikiKey: 'w' } },
+			() => guard('update-page', 'other', ctx({ proxy: true })),
+		);
+		const envelope = assertStructuredError(result!, 'permission_denied');
+		expect(envelope.message).toContain('"w"');
+	});
+
+	it('refuses an anonymous write on a wiki hosted sign-in does not cover', async () => {
+		const result = await guard('update-page', 'other', ctx({ proxy: true }));
+		assertStructuredError(result!, 'permission_denied');
+	});
+
+	it('allows a read on a wiki hosted sign-in does not cover', async () => {
+		const result = await guard('get-page', 'other', ctx({ proxy: true }));
+		expect(result).toBeUndefined();
+	});
+
 	it('rejects an extension write tool dispatched anonymously on a proxy-enabled wiki', async () => {
-		const result = await checkWikiCapability('neowiki-create-subject', 'w', ctx({ proxy: true }));
+		const result = await guard('neowiki-create-subject', 'w', ctx({ proxy: true }));
 		expect(result?.isError).toBe(true);
 		expect(messageOf(result)).toContain('Authentication required to use write tools');
 	});
 
 	it('does not apply the proxy step-up on the stdio transport', async () => {
-		const result = await checkWikiCapability(
-			'update-page',
-			'w',
-			ctx({ proxy: true, transport: 'stdio' }),
-		);
+		const result = await guard('update-page', 'w', ctx({ proxy: true, transport: 'stdio' }));
 		expect(result).toBeUndefined();
 	});
 
 	it('falls back to the legacy blanket OAuth rejection (read tool too) when the proxy is disabled', async () => {
 		// Proxy disabled, OAuth-only wiki, no token: the legacy guard rejects even a
 		// read tool — proving the step-up only loosens behavior when the proxy is on.
-		const result = await checkWikiCapability('get-page', 'w', ctx({ proxy: false }));
+		const result = await guard('get-page', 'w', ctx({ proxy: false }));
 		expect(result?.isError).toBe(true);
 		expect(messageOf(result)).toContain('requires an authenticated user');
 	});

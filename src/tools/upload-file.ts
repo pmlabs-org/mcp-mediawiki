@@ -4,8 +4,10 @@ import type { ApiUploadParams } from 'types-mediawiki-api';
 import type { ApiUploadResponse } from 'mwn';
 import type { Tool } from '../runtime/tool.ts';
 import type { ToolContext } from '../runtime/context.ts';
-import { assertAllowedPath, UploadValidationError } from '../transport/uploadGuard.ts';
-import { formatEditComment, buildPageUrl } from '../wikis/utils.ts';
+import { UploadValidationError } from '../wikis/uploadDirs.ts';
+import { fileExists } from '../wikis/fileExistence.ts';
+import { formatEditComment } from '../wikis/utils.ts';
+import { uploadedFile } from '../wikis/fileUpload.ts';
 
 const inputSchema = {
 	filepath: z.string().describe('File path on the local disk'),
@@ -32,7 +34,7 @@ export const uploadFile: Tool<typeof inputSchema> = {
 	async handle({ filepath, title, text, comment }, ctx: ToolContext): Promise<CallToolResult> {
 		let resolvedPath: string;
 		try {
-			resolvedPath = await assertAllowedPath(filepath, ctx.uploadDirs.list());
+			resolvedPath = await ctx.uploadDirs.resolve(filepath);
 		} catch (error) {
 			if (error instanceof UploadValidationError) {
 				return ctx.format.invalidInput(`Failed to upload file: ${error.message}`);
@@ -41,6 +43,14 @@ export const uploadFile: Tool<typeof inputSchema> = {
 		}
 
 		const mwn = await ctx.mwn();
+		// The upload ignores the wiki's warnings, `exists` among them, so the wiki
+		// would replace the file rather than refuse.
+		if (await fileExists(mwn, title)) {
+			return ctx.format.conflict(
+				`File "${title}" already exists. To replace it with a new revision, use update-file.`,
+			);
+		}
+
 		const params: ApiUploadParams = {
 			comment: formatEditComment(ctx, 'upload-file', comment),
 		};
@@ -52,16 +62,6 @@ export const uploadFile: Tool<typeof inputSchema> = {
 			params,
 		);
 
-		const imageinfo = (
-			data as ApiUploadResponse & {
-				imageinfo?: { descriptionurl?: string; url?: string };
-			}
-		).imageinfo;
-		const filename = data.filename ?? title.replace(/^File:/, '');
-		return ctx.format.ok({
-			filename,
-			pageUrl: imageinfo?.descriptionurl ?? (await buildPageUrl(ctx, `File:${filename}`)),
-			...(imageinfo?.url !== undefined ? { fileUrl: imageinfo.url } : {}),
-		});
+		return uploadedFile(ctx, data, title);
 	},
 };

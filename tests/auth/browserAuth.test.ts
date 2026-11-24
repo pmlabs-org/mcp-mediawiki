@@ -1,11 +1,9 @@
 // tests/auth/browserAuth.test.ts
 import { ChildProcess } from 'node:child_process';
+import { createServer } from 'node:http';
+import type { AddressInfo } from 'node:net';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import {
-	browserAuth,
-	BrowserAuthError,
-	_resetBrowserAuthDedupForTesting,
-} from '../../src/auth/browserAuth.ts';
+import { browserAuth, BrowserAuthError } from '../../src/auth/browserAuth.ts';
 import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 import { useTempTokenStore } from '../helpers/tempTokenStore.ts';
 import { createTokenStore } from '../../src/auth/tokenStore.ts';
@@ -23,7 +21,6 @@ beforeEach(() => vi.clearAllMocks());
 afterEach(async () => {
 	await fakeAs?.close();
 	_resetMetadataCacheForTesting();
-	_resetBrowserAuthDedupForTesting();
 	vi.unstubAllEnvs();
 });
 
@@ -102,11 +99,10 @@ describe('browserAuth', () => {
 
 	it('callbackPort: rejects with listen_failed when the configured port is in use', async () => {
 		fakeAs = await startFakeAs();
-		const fixedPort = 53201;
-		// Pre-bind the port to force EADDRINUSE.
-		const { createServer } = await import('node:http');
+		// Holding the port forces EADDRINUSE.
 		const blocker = createServer();
-		await new Promise<void>((resolve) => blocker.listen(fixedPort, '127.0.0.1', () => resolve()));
+		await new Promise<void>((resolve) => blocker.listen(0, '127.0.0.1', () => resolve()));
+		const fixedPort = (blocker.address() as AddressInfo).port;
 		try {
 			await expect(
 				browserAuth('test-wiki', {
@@ -125,8 +121,7 @@ describe('browserAuth', () => {
 
 	it('callbackPort: binds the requested port and uses it in redirect_uri', async () => {
 		fakeAs = await startFakeAs();
-		// Pick a high ephemeral port that's almost certainly free in CI.
-		const fixedPort = 53117;
+		const fixedPort = await freePort();
 		// Capture the URL passed to open() so we can assert the redirect_uri.
 		let capturedAuthUrl = '';
 		vi.mocked(openMod).mockImplementation((async (url: string) => {
@@ -170,29 +165,6 @@ describe('browserAuth', () => {
 		stderrSpy.mockRestore();
 	});
 
-	it('concurrent calls for the same wiki share one dance (open called once)', async () => {
-		fakeAs = await startFakeAs();
-		vi.mocked(openMod).mockImplementation(
-			fakeBrowserDriver(fakeAs.url, 'consent') as typeof openMod,
-		);
-
-		const [t1, t2] = await Promise.all([
-			browserAuth('test-wiki', {
-				wiki: makeWiki(fakeAs.url),
-				clientId: 'my-client',
-				scopes: ['edit'],
-			}),
-			browserAuth('test-wiki', {
-				wiki: makeWiki(fakeAs.url),
-				clientId: 'my-client',
-				scopes: ['edit'],
-			}),
-		]);
-
-		expect(t1).toBe(t2);
-		expect(vi.mocked(openMod).mock.calls.length).toBe(1);
-	});
-
 	it('BrowserAuthError is an instanceof Error', async () => {
 		fakeAs = await startFakeAs();
 		vi.mocked(openMod).mockImplementation(fakeBrowserDriver(fakeAs.url, 'deny') as typeof openMod);
@@ -210,3 +182,12 @@ describe('browserAuth', () => {
 		expect(caught).toBeInstanceOf(Error);
 	});
 });
+
+/** A port the OS just handed out and took back, so no other test holds it. */
+async function freePort(): Promise<number> {
+	const probe = createServer();
+	await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', () => resolve()));
+	const { port } = probe.address() as AddressInfo;
+	await new Promise<void>((resolve) => probe.close(() => resolve()));
+	return port;
+}

@@ -1,10 +1,6 @@
 import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
-import { describe, it, expect, vi, beforeEach, afterEach, type Mock } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/server';
-
-vi.mock('../../src/runtime/metrics.ts', () => ({
-	recordToolCall: vi.fn(),
-}));
 import {
 	detectTruncation,
 	emitToolCall,
@@ -14,7 +10,8 @@ import {
 	parseEnvelope,
 	safeTarget,
 } from '../../src/runtime/instrument.ts';
-import { recordToolCall } from '../../src/runtime/metrics.ts';
+import { ClassifiedError } from '../../src/errors/classifyError.ts';
+import { liveMetrics, metricsOff, scrape } from '../helpers/metrics.ts';
 
 function captureToolCallLine(spy: StderrWriteSpy): Record<string, unknown> {
 	const events = spy.mock.calls
@@ -131,6 +128,10 @@ describe('extractUpstreamStatus', () => {
 	it('returns undefined when status is not a number', () => {
 		expect(extractUpstreamStatus({ response: { status: '429' } })).toBeUndefined();
 	});
+
+	it('returns the status a pack recorded on the error it classified', () => {
+		expect(extractUpstreamStatus(new ClassifiedError('rate_limited', 'slow down', 429))).toBe(429);
+	});
 });
 
 describe('safeTarget', () => {
@@ -165,7 +166,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('emits a success line with tool, outcome, duration_ms and integer rounding', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
@@ -174,7 +175,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -189,7 +190,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('includes target when extractor returns non-empty value', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: (a: { title: string }) => a.title,
 			args: { title: 'Main Page' },
@@ -198,7 +199,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -206,7 +207,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('omits target when extractor is undefined', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-pages',
 			target: undefined,
 			args: {},
@@ -215,7 +216,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -223,7 +224,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('omits target when extractor returns empty string', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: () => '',
 			args: {},
@@ -232,7 +233,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -240,7 +241,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('omits target when extractor throws', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: () => {
 				throw new Error('oops');
@@ -251,7 +252,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -267,16 +268,16 @@ describe('emitToolCall', () => {
 		['rate_limited', 'warning'],
 		['upstream_failure', 'error'],
 	])('maps category %s to level %s and includes error_message', (category, level) => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
 			started: performance.now(),
 			result: errResult(category, 'msg'),
-			outcome: category as Parameters<typeof emitToolCall>[0]['outcome'],
+			outcome: category as Parameters<typeof emitToolCall>[1]['outcome'],
 			upstreamStatus: undefined,
 			errorMessage: 'msg',
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -287,7 +288,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('includes upstream_status when set', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
@@ -296,7 +297,7 @@ describe('emitToolCall', () => {
 			outcome: 'rate_limited',
 			upstreamStatus: 429,
 			errorMessage: 'too many',
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -304,7 +305,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('reports truncated:true when result has truncation field', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
@@ -313,7 +314,7 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
@@ -321,7 +322,7 @@ describe('emitToolCall', () => {
 	});
 
 	it('reports truncated:false when result has no truncation field', () => {
-		emitToolCall({
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
@@ -330,15 +331,15 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'a.example',
 		});
 
 		expect(captureToolCallLine(stderrSpy).truncated).toBe(false);
 	});
 
-	it('sets caller=anonymous when runtimeToken is undefined', () => {
-		emitToolCall({
+	it('logs the caller it is given', () => {
+		emitToolCall(metricsOff(), {
 			toolName: 'get-page',
 			target: undefined,
 			args: {},
@@ -347,39 +348,19 @@ describe('emitToolCall', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'sha256:0123456789ab',
 			wikiKey: 'a.example',
 		});
 
-		expect(captureToolCallLine(stderrSpy).caller).toBe('anonymous');
-	});
-
-	it('sets caller=sha256:<12 hex> when a runtimeToken is provided', () => {
-		emitToolCall({
-			toolName: 'get-page',
-			target: undefined,
-			args: {},
-			started: performance.now(),
-			result: okResult(),
-			outcome: 'success',
-			upstreamStatus: undefined,
-			errorMessage: undefined,
-			runtimeToken: 'secret-token',
-			wikiKey: 'a.example',
-		});
-
-		expect(captureToolCallLine(stderrSpy).caller).toMatch(/^sha256:[0-9a-f]{12}$/);
+		expect(captureToolCallLine(stderrSpy).caller).toBe('sha256:0123456789ab');
 	});
 });
 
 describe('emitToolCall — metrics integration', () => {
-	beforeEach(() => {
-		(recordToolCall as Mock).mockClear();
-	});
-
-	it('forwards the call to recordToolCall with raw duration and labels', () => {
+	it('counts the call under its tool, wiki and outcome, with its upstream status', async () => {
+		const metrics = liveMetrics();
 		const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-		emitToolCall({
+		emitToolCall(metrics, {
 			toolName: 'get-page',
 			args: { title: 'X' },
 			started: performance.now() - 25,
@@ -387,25 +368,26 @@ describe('emitToolCall — metrics integration', () => {
 			outcome: 'success',
 			upstreamStatus: 200,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'example.org',
 		});
 		stderrSpy.mockRestore();
-		expect(recordToolCall).toHaveBeenCalledTimes(1);
-		const call = (recordToolCall as Mock).mock.calls[0][0];
-		expect(call).toMatchObject({
-			tool: 'get-page',
-			wiki: 'example.org',
-			outcome: 'success',
-			upstreamStatus: 200,
-		});
-		expect(typeof call.durationMs).toBe('number');
-		expect(call.durationMs).toBeGreaterThanOrEqual(0);
+		const body = await scrape(metrics);
+		expect(body).toContain(
+			'mcp_tool_calls_total{tool="get-page",wiki="example.org",outcome="success"} 1',
+		);
+		expect(body).toContain(
+			'mcp_tool_call_duration_seconds_count{tool="get-page",wiki="example.org"} 1',
+		);
+		expect(body).toContain(
+			'mcp_upstream_status_total{tool="get-page",wiki="example.org",status="200"} 1',
+		);
 	});
 
-	it('passes upstreamStatus undefined through unchanged', () => {
+	it('records no upstream status for a call that had none', async () => {
+		const metrics = liveMetrics();
 		const stderrSpy = vi.spyOn(process.stderr, 'write').mockReturnValue(true);
-		emitToolCall({
+		emitToolCall(metrics, {
 			toolName: 'get-pages',
 			args: {},
 			started: performance.now(),
@@ -413,11 +395,10 @@ describe('emitToolCall — metrics integration', () => {
 			outcome: 'success',
 			upstreamStatus: undefined,
 			errorMessage: undefined,
-			runtimeToken: undefined,
+			caller: 'anonymous',
 			wikiKey: 'example.org',
 		});
 		stderrSpy.mockRestore();
-		const call = (recordToolCall as Mock).mock.calls[0][0];
-		expect(call.upstreamStatus).toBeUndefined();
+		expect(await scrape(metrics)).not.toContain('mcp_upstream_status_total{');
 	});
 });

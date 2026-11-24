@@ -1,13 +1,19 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn } from '../../../helpers/mock-mwn.ts';
 import { createMockMwnError } from '../../../helpers/mock-mwn-error.ts';
-import { fakeContext } from '../../../helpers/fakeContext.ts';
+import { contextOn } from '../../../helpers/fakeContext.ts';
 import { cargoDescribeTable } from '../../../../src/tools/extensions/cargo/cargo-describe-table.ts';
 import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 import {
 	assertStructuredError,
 	assertStructuredSuccess,
 } from '../../../helpers/structuredResult.ts';
+
+// A wiki whose API call fails with `error`.
+function ctxRejecting(error: Error): ReturnType<typeof contextOn> {
+	const mock = createMockMwn({ request: vi.fn().mockRejectedValue(error) });
+	return contextOn(mock);
+}
 
 describe('cargo-describe-table', () => {
 	it('forwards table to action=cargofields and normalizes the response', async () => {
@@ -19,7 +25,7 @@ describe('cargo-describe-table', () => {
 				},
 			}),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await cargoDescribeTable.handle({ table: 'items' }, ctx);
 
@@ -50,7 +56,7 @@ describe('cargo-describe-table', () => {
 				},
 			}),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await cargoDescribeTable.handle({ table: 'items' }, ctx);
 
@@ -68,7 +74,7 @@ describe('cargo-describe-table', () => {
 				cargofields: { name: { type: 'String' } },
 			}),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await cargoDescribeTable.handle({ table: 'items' }, ctx);
 
@@ -89,7 +95,7 @@ describe('cargo-describe-table', () => {
 				},
 			}),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await cargoDescribeTable.handle({ table: 'items' }, ctx);
 
@@ -106,7 +112,7 @@ describe('cargo-describe-table', () => {
 		const mock = createMockMwn({
 			request: vi.fn().mockResolvedValueOnce({}).mockResolvedValueOnce({ cargofields: {} }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const r1 = await cargoDescribeTable.handle({ table: 'items' }, ctx);
 		expect(r1.structuredContent).toMatchObject({ fields: [] });
@@ -126,7 +132,7 @@ describe('cargo-describe-table', () => {
 					),
 				),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await dispatch(cargoDescribeTable, ctx)({ table: 'nonexistent' });
 
@@ -137,11 +143,37 @@ describe('cargo-describe-table', () => {
 		expect(envelope.code).toBe('internal_api_error_MWException');
 	});
 
+	it('reports a table current Cargo does not know as invalid_input with the "Table not found" hint', async () => {
+		const ctx = ctxRejecting(
+			createMockMwnError('db_error', 'db_error: ⧼Error: Table Nope not found.⧽'),
+		);
+
+		const result = await dispatch(cargoDescribeTable, ctx)({ table: 'Nope' });
+
+		const envelope = assertStructuredError(result, 'invalid_input', 'db_error');
+		expect(envelope.message).toBe(
+			'Table not found. Use cargo-list-tables to see available table names.',
+		);
+	});
+
+	it('reports any other database error as upstream_failure', async () => {
+		const ctx = ctxRejecting(
+			createMockMwnError(
+				'db_error',
+				'db_error: ⧼Cannot access the database: no reachable server.⧽',
+			),
+		);
+
+		const result = await dispatch(cargoDescribeTable, ctx)({ table: 'Books' });
+
+		assertStructuredError(result, 'upstream_failure', 'db_error');
+	});
+
 	it('surfaces network failures as upstream_failure via dispatcher', async () => {
 		const mock = createMockMwn({
 			request: vi.fn().mockRejectedValue(new Error('cargofields network failure')),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 
 		const result = await dispatch(cargoDescribeTable, ctx)({ table: 'items' });
 

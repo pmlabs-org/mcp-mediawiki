@@ -1,22 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn, type MockMwn } from '../../../helpers/mock-mwn.ts';
-import { fakeContext, withoutEditAttribution } from '../../../helpers/fakeContext.ts';
+import { withoutEditAttribution, contextOn } from '../../../helpers/fakeContext.ts';
 import type { ToolContext } from '../../../../src/runtime/context.ts';
 import { neowikiDeleteSubject } from '../../../../src/tools/extensions/neowiki/neowiki-delete-subject.ts';
 import { assertStructuredError } from '../../../helpers/structuredResult.ts';
-
-function httpError(status: number, data: unknown): Error & { response: unknown } {
-	const err = new Error(`HTTP ${status}`) as Error & { response: unknown };
-	err.response = { status, data };
-	return err;
-}
+import { httpError } from '../../../helpers/httpError.ts';
+import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 
 function contextWith(): { mock: MockMwn; ctx: ToolContext } {
 	const mock = createMockMwn({
 		getCsrfToken: vi.fn().mockResolvedValue('tok'),
 		rawRequest: vi.fn().mockResolvedValue({ data: '' }),
 	});
-	return { mock, ctx: fakeContext({ mwn: async () => mock as never }) };
+	return { mock, ctx: contextOn(mock) };
 }
 
 function sentBody(mock: MockMwn): Record<string, unknown> | undefined {
@@ -79,13 +75,17 @@ describe('neowiki-delete-subject', () => {
 		expect(sentBody(mock)).toBeUndefined();
 	});
 
-	it('maps a 403 to permission_denied', async () => {
+	it('reports a 403 as a permission_denied failure of the delete', async () => {
 		const mock = createMockMwn({
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockRejectedValue(httpError(403, { status: 'error', message: 'nope' })),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
-		const result = await neowikiDeleteSubject.handle({ id: 's1demo' }, ctx);
-		assertStructuredError(result, 'permission_denied');
+		const ctx = contextOn(mock);
+
+		const result = await dispatch(neowikiDeleteSubject, ctx)({ id: 's1demo' });
+
+		expect(assertStructuredError(result, 'permission_denied').message).toBe(
+			'Failed to delete NeoWiki subject: nope',
+		);
 	});
 });

@@ -11,16 +11,19 @@ import { CimdResolver } from '../../src/auth/authorizationServer/cimd.ts';
 import type { CimdFetchResult } from '../../src/auth/authorizationServer/cimd.ts';
 import { verifyAccessToken } from '../../src/auth/authorizationServer/jwt.ts';
 import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
-import {
-	buildRedirectPolicy,
-	parseRedirectAllowlist,
-} from '../../src/auth/authorizationServer/redirectPolicy.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
+import { callWiki } from '../helpers/fakeContext.ts';
+import { buildConsentCookie } from '../../src/auth/authorizationServer/consent.ts';
+import { parseRedirectAllowlist } from '../../src/auth/authorizationServer/redirectPolicy.ts';
 import { checkWikiCapability } from '../../src/runtime/wikiCapability.ts';
-import { createToolContext } from '../../src/runtime/createContext.ts';
+import { createSharedContext } from '../../src/runtime/createContext.ts';
 import { logger } from '../../src/runtime/logger.ts';
 import { withRequestContext, getRuntimeToken } from '../../src/runtime/requestContext.ts';
 import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 import { runHostedFlow, setCookieHeaders } from '../helpers/fakeMcpClient.ts';
+import { readAuthPolicy } from '../../src/runtime/authShape.ts';
+import { fakeAppDeps } from '../helpers/fakeAppDeps.ts';
 
 const ISSUER = 'https://mcp.example/mcp';
 const SIGNING_KEY = 'k'.repeat(32);
@@ -49,19 +52,17 @@ function appState(fakeAsUrl: string) {
 // A ProxyConfig whose authorize + token-exchange bases both point at the fake AS
 // (so the in-process flow reaches it), as the task guidance prescribes.
 function proxyConfig(fakeAsUrl: string): ProxyConfig {
-	return {
+	return fakeProxyConfig({
 		issuer: ISSUER,
 		authorizeBase: fakeAsUrl,
 		tokenExchangeBase: fakeAsUrl,
-		scriptpath: '/w',
 		callbackUrl: `${ISSUER}/oauth/callback`,
 		upstreamClientId: 'UPSTREAM-CLIENT',
+		upstreamClientSecret: undefined,
 		signingKey: SIGNING_KEY,
 		consentTtlMs: 60_000,
 		tokenTtlMs: 55 * 60 * 1000,
-		redirectAllowlist: [],
-		cimdAllowedHosts: [],
-	};
+	});
 }
 
 function stubCreateServer(): McpServer {
@@ -77,23 +78,14 @@ function makeDeps(
 	pc: ProxyConfig | null,
 	onServe?: () => void | Promise<void>,
 ): BuildAppDeps {
-	return {
+	return fakeAppDeps({
 		state: appState(fakeAsUrl),
-		getProxyConfig: () => pc,
-		proxyStore: store,
-		proxyRedirectPolicy: pc ? buildRedirectPolicy(pc.redirectAllowlist) : null,
-		cimdResolver: null,
-		defaultWikiKey: 'test',
-		defaultWikiSitename: 'Test Wiki',
+		auth: readAuthPolicy(process.env, 'http', pc ? fakeHostedProxy(pc, store) : null, null),
 		createServerFn: async () => {
 			await onServe?.();
 			return stubCreateServer();
 		},
-		host: '127.0.0.1',
-		allowedHosts: undefined,
-		allowedOrigins: [],
-		maxRequestBody: '1mb',
-	};
+	});
 }
 
 // Origin validation must guard the MCP endpoint itself without reaching the
@@ -237,7 +229,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		// The factory seam calls the wiki action API with the request's resolved
 		// runtime token, standing in for what mwn would send to /api.php.
 		const onServe = vi.fn(async () => {
-			const runtimeToken = getRuntimeToken();
+			const runtimeToken = getRuntimeToken('test');
 			await fetch(`${fakeAs!.url}/w/api.php?action=query&meta=tokens`, {
 				headers: runtimeToken ? { Authorization: `Bearer ${runtimeToken}` } : {},
 			});
@@ -320,7 +312,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		const captured: { token?: string; seen: boolean } = { seen: false };
 		const deps = makeDeps(fakeAs.url, store, pc, () => {
 			captured.seen = true;
-			captured.token = getRuntimeToken();
+			captured.token = getRuntimeToken('test');
 		});
 		const { app } = buildApp(deps);
 		const anonRes = await request(app)
@@ -334,15 +326,15 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 
 		// (b) The wikiCapability step-up: with no runtime token, a write tool is
 		// rejected with an authentication error, while a read tool is allowed.
-		const ctx = createToolContext({
+		const ctx = createSharedContext({
 			logger,
 			state: deps.state,
-			transport: 'http',
-			getProxyConfig: deps.getProxyConfig,
+			auth: deps.auth,
+			metrics: deps.metrics,
 		});
 
 		const writeResult = await withRequestContext(undefined, () =>
-			checkWikiCapability('update-page', 'test', ctx),
+			checkWikiCapability('update-page', callWiki(ctx, 'test'), ctx),
 		);
 		expect(writeResult).toBeDefined();
 		expect(writeResult?.isError).toBe(true);
@@ -353,7 +345,7 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		// A read-only tool (e.g. get-page) is NOT a write tool, so it passes the
 		// capability guard anonymously (returns undefined = proceed).
 		const readResult = await withRequestContext(undefined, () =>
-			checkWikiCapability('get-page', 'test', ctx),
+			checkWikiCapability('get-page', callWiki(ctx, 'test'), ctx),
 		);
 		expect(readResult).toBeUndefined();
 	});
@@ -728,7 +720,10 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 		};
 		const cimdResolver = new CimdResolver((h) => h === 'vscode.dev', countingFetcher);
 
-		const { app } = buildApp({ ...makeDeps('https://test.example', store, pc), cimdResolver });
+		const { app } = buildApp({
+			...makeDeps('https://test.example', store, pc),
+			auth: readAuthPolicy(process.env, 'http', fakeHostedProxy(pc, store, cimdResolver), null),
+		});
 
 		// Success: allowlisted host → document fetched, self-matches → consent page
 		// built from that document's own client_name and redirect_uris.
@@ -789,7 +784,10 @@ describe('hosted OAuth proxy — end-to-end (real buildApp routes)', () => {
 			cacheControl: null,
 		});
 		const cimdResolver = new CimdResolver((h) => h === 'vscode.dev', fetcher);
-		const { app } = buildApp({ ...makeDeps('https://test.example', store, pc), cimdResolver });
+		const { app } = buildApp({
+			...makeDeps('https://test.example', store, pc),
+			auth: readAuthPolicy(process.env, 'http', fakeHostedProxy(pc, store, cimdResolver), null),
+		});
 
 		const res = await request(app).get('/mcp/authorize').query({
 			response_type: 'code',
@@ -840,20 +838,11 @@ describe('private wiki — connection-time auth challenge', () => {
 			},
 			uploadDirs: [],
 		});
-		return {
+		return fakeAppDeps({
 			state,
-			getProxyConfig: () => pc,
-			proxyStore: store,
-			proxyRedirectPolicy: pc ? buildRedirectPolicy(pc.redirectAllowlist) : null,
-			cimdResolver: null,
-			defaultWikiKey: 'test',
-			defaultWikiSitename: 'Test Wiki',
+			auth: readAuthPolicy(process.env, 'http', pc ? fakeHostedProxy(pc, store) : null, null),
 			createServerFn: stubCreateServer,
-			host: '127.0.0.1',
-			allowedHosts: undefined,
-			allowedOrigins: [],
-			maxRequestBody: '1mb',
-		};
+		});
 	}
 
 	it('challenges an anonymous initialize with 401 + WWW-Authenticate', async () => {
@@ -929,20 +918,7 @@ describe('private wiki — connection-time auth challenge', () => {
 			},
 			uploadDirs: [],
 		});
-		buildApp({
-			state,
-			getProxyConfig: () => null,
-			proxyStore: new InMemoryProxyStore(),
-			proxyRedirectPolicy: null,
-			cimdResolver: null,
-			defaultWikiKey: 'test',
-			defaultWikiSitename: 'Test Wiki',
-			createServerFn: stubCreateServer,
-			host: '127.0.0.1',
-			allowedHosts: undefined,
-			allowedOrigins: [],
-			maxRequestBody: '1mb',
-		});
+		buildApp(fakeAppDeps({ state }));
 
 		expect(warnSpy).toHaveBeenCalledWith(
 			expect.stringContaining('marked private but has no oauth2ClientId'),
@@ -969,20 +945,7 @@ describe('private wiki — connection-time auth challenge', () => {
 			},
 			uploadDirs: [],
 		});
-		buildApp({
-			state,
-			getProxyConfig: () => null,
-			proxyStore: new InMemoryProxyStore(),
-			proxyRedirectPolicy: null,
-			cimdResolver: null,
-			defaultWikiKey: 'test',
-			defaultWikiSitename: 'Test Wiki',
-			createServerFn: stubCreateServer,
-			host: '127.0.0.1',
-			allowedHosts: undefined,
-			allowedOrigins: [],
-			maxRequestBody: '1mb',
-		});
+		buildApp(fakeAppDeps({ state }));
 
 		expect(warnSpy).not.toHaveBeenCalledWith(
 			expect.stringContaining('marked private but has no oauth2ClientId'),
@@ -993,9 +956,7 @@ describe('private wiki — connection-time auth challenge', () => {
 
 // Exercises the config -> ProxyConfig.redirectAllowlist -> buildApp -> route ->
 // handleRegister seam with a REAL operator allowlist (not the empty default the
-// rest of the suite uses). makeDeps derives proxyRedirectPolicy from
-// pc.redirectAllowlist via the SAME buildRedirectPolicy call the production boot
-// uses, so a regression to that wiring would 400 every allowlisted client here.
+// rest of the suite uses).
 describe('operator redirect allowlist — end-to-end (config → route → handleRegister)', () => {
 	beforeEach(() => {
 		vi.stubEnv('MCP_PUBLIC_URL', ISSUER);
@@ -1100,6 +1061,98 @@ describe('operator redirect allowlist — end-to-end (config → route → handl
 // the production refresh (defaultRefresh) against a live fake AS, so the full
 // oauthFlow.refreshTokens -> classifyRefreshError -> UpstreamBearerError chain runs
 // over HTTP — not through an injected refresh stub.
+describe('without the hosted proxy', () => {
+	it('serves none of the authorization-server endpoints', async () => {
+		const { app } = buildApp(makeDeps('https://wiki.example', new InMemoryProxyStore(), null));
+
+		const responses = await Promise.all([
+			request(app).get('/.well-known/oauth-authorization-server'),
+			request(app).get('/.well-known/oauth-authorization-server/mcp'),
+			request(app).post('/mcp/register').send({}),
+			request(app).get('/mcp/authorize'),
+			request(app).post('/mcp/consent'),
+			request(app).get('/mcp/oauth/callback'),
+			request(app).post('/mcp/token'),
+		]);
+
+		expect(responses.map((r) => r.status)).toEqual([404, 404, 404, 404, 404, 404, 404]);
+	});
+});
+
+describe('hosted OAuth proxy — consent page', () => {
+	const redirectUri = 'http://127.0.0.1:5599/cb';
+	const pc = proxyConfig('https://wiki.example');
+
+	beforeEach(() => {
+		vi.stubEnv('MCP_PUBLIC_URL', ISSUER);
+	});
+	afterEach(() => {
+		vi.unstubAllEnvs();
+	});
+
+	function proxyApp(): ReturnType<typeof buildApp>['app'] {
+		return buildApp(makeDeps('https://wiki.example', new InMemoryProxyStore(), pc)).app;
+	}
+
+	async function registeredClient(app: ReturnType<typeof buildApp>['app']): Promise<string> {
+		const reg = await request(app)
+			.post('/mcp/register')
+			.set('Content-Type', 'application/json')
+			.send({ client_name: 'Local', redirect_uris: [redirectUri] });
+		return String(reg.body.client_id);
+	}
+
+	function authorize(app: ReturnType<typeof buildApp>['app'], clientId: string): request.Test {
+		return request(app).get('/mcp/authorize').query({
+			response_type: 'code',
+			client_id: clientId,
+			code_challenge: 'abc123',
+			code_challenge_method: 'S256',
+			redirect_uri: redirectUri,
+			state: 's',
+			resource: ISSUER,
+		});
+	}
+
+	async function rememberedConsent(clientId: string, wiki: string): Promise<string> {
+		const cookie = await buildConsentCookie(pc, { clientId, redirectHost: '127.0.0.1', wiki });
+		return cookie.split(';')[0];
+	}
+
+	it('names the wiki the user signs in to', async () => {
+		const app = proxyApp();
+
+		const res = await authorize(app, await registeredClient(app));
+
+		expect(res.text).toContain('your Test Wiki account');
+	});
+
+	it('skips the page when consent was remembered for the proxy wiki', async () => {
+		const app = proxyApp();
+		const clientId = await registeredClient(app);
+
+		const res = await authorize(app, clientId).set(
+			'Cookie',
+			await rememberedConsent(clientId, pc.wikiKey),
+		);
+
+		expect(res.status).toBe(302);
+	});
+
+	it('asks again when consent was remembered for another wiki', async () => {
+		const app = proxyApp();
+		const clientId = await registeredClient(app);
+
+		const res = await authorize(app, clientId).set(
+			'Cookie',
+			await rememberedConsent(clientId, 'other'),
+		);
+
+		expect(res.status).toBe(200);
+		expect(res.text).toContain('Allow Local');
+	});
+});
+
 describe('hosted OAuth proxy — upstream refresh on the /mcp path (e2e)', () => {
 	let fakeAs: FakeAsHandle | undefined;
 
@@ -1161,7 +1214,7 @@ describe('hosted OAuth proxy — upstream refresh on the /mcp path (e2e)', () =>
 	// per-request factory seam.
 	function apiCallingOnServe() {
 		return vi.fn(async () => {
-			const runtimeToken = getRuntimeToken();
+			const runtimeToken = getRuntimeToken('test');
 			await fetch(`${fakeAs!.url}/w/api.php?action=query&meta=tokens`, {
 				headers: runtimeToken ? { Authorization: `Bearer ${runtimeToken}` } : {},
 			});

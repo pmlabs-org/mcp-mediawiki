@@ -2,7 +2,7 @@ import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { Tool } from '../../../runtime/tool.ts';
 import type { ToolContext } from '../../../runtime/context.ts';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
+import { neowikiRequest } from './neowikiRequest.ts';
 import { formatEditComment } from '../../../wikis/utils.ts';
 import { resolvePageId, hasOnePageRef } from './pageId.ts';
 
@@ -31,7 +31,7 @@ interface SetMainResponse {
 export const neowikiSetMainSubject: Tool<typeof inputSchema> = {
 	name: 'neowiki-set-main-subject',
 	description:
-		'Sets which existing Subject on a wiki page is its Main Subject, or clears it. Enabled only when the wiki has NeoWiki installed. Pass subjectId to promote a Subject that already exists on the page, or null to clear the Main Subject. This differs from neowiki-create-subject with isMain, which creates a NEW main Subject. Requires the edit right. Pre-1.0: the NeoWiki API may change without notice.',
+		"Sets which existing Subject on a wiki page is its Main Subject, or clears it. Enabled only when the wiki has NeoWiki installed. Pass subjectId to promote one of the page's other Subjects, or null to clear the Main Subject. A Dependent Subject cannot be a Main Subject. This differs from neowiki-create-subject with isMain, which creates a NEW main Subject. Requires the edit right. Pre-1.0: the NeoWiki API may change without notice.",
 	inputSchema,
 	annotations: {
 		title: 'Set NeoWiki main subject',
@@ -50,25 +50,21 @@ export const neowikiSetMainSubject: Tool<typeof inputSchema> = {
 
 		const mwn = await ctx.mwn();
 		const editComment = formatEditComment(ctx, 'neowiki-set-main-subject', comment);
-		try {
-			const resolvedPageId = await resolvePageId(mwn, { title, pageId });
-			if (resolvedPageId === null) {
-				return ctx.format.notFound(`Page "${title}" not found`);
-			}
-
-			// Always send the subjectId key: omitting it is a 400 upstream, whereas
-			// an explicit null is the documented way to clear the Main Subject.
-			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- NeoWiki set-main response shape; trusted at this boundary
-			const data = (await neowikiRequest(mwn, {
-				method: 'PUT',
-				path: `/page/${resolvedPageId}/mainSubject`,
-				csrf: true,
-				body: { subjectId, ...(editComment !== undefined ? { comment: editComment } : {}) },
-			})) as SetMainResponse;
-
-			return ctx.format.ok({ pageId: resolvedPageId, status: data.status ?? 'changed' });
-		} catch (err) {
-			return neowikiErrorResult(err, ctx);
+		const resolvedPageId = await resolvePageId(mwn, { title, pageId });
+		if (resolvedPageId === null) {
+			return ctx.format.notFound(`Page "${title}" not found`);
 		}
+
+		// Always send the subjectId key: omitting it is a 400 upstream, whereas
+		// an explicit null is the documented way to clear the Main Subject.
+		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- NeoWiki set-main response shape; trusted at this boundary
+		const data = (await neowikiRequest(mwn, {
+			method: 'PUT',
+			path: `/page/${resolvedPageId}/mainSubject`,
+			csrf: true,
+			body: { subjectId, ...(editComment !== undefined ? { comment: editComment } : {}) },
+		})) as SetMainResponse;
+
+		return ctx.format.ok({ pageId: resolvedPageId, status: data.status ?? 'changed' });
 	},
 };

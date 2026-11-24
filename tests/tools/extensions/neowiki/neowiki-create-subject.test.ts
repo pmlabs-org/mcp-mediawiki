@@ -1,18 +1,28 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn, type MockMwn } from '../../../helpers/mock-mwn.ts';
-import { fakeContext, withoutEditAttribution } from '../../../helpers/fakeContext.ts';
+import { withoutEditAttribution, contextOn } from '../../../helpers/fakeContext.ts';
 import type { ToolContext } from '../../../../src/runtime/context.ts';
 import { neowikiCreateSubject } from '../../../../src/tools/extensions/neowiki/neowiki-create-subject.ts';
 import { assertStructuredError } from '../../../helpers/structuredResult.ts';
+import { httpError } from '../../../helpers/httpError.ts';
+import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 
 const stmts = { Country: { propertyType: 'text', value: ['Germany'] } };
 
-function contextWith(): { mock: MockMwn; ctx: ToolContext } {
+const birth = {
+	id: 's1demo6sssssss1',
+	schema: 'Birth',
+	statements: { Year: { propertyType: 'number', value: 1881 } },
+};
+
+const created = { status: 'created', subjectId: 's1' };
+
+function contextWith(data: unknown): { mock: MockMwn; ctx: ToolContext } {
 	const mock = createMockMwn({
 		getCsrfToken: vi.fn().mockResolvedValue('tok'),
-		rawRequest: vi.fn().mockResolvedValue({ data: { status: 'created', subjectId: 's1' } }),
+		rawRequest: vi.fn().mockResolvedValue({ data }),
 	});
-	return { mock, ctx: fakeContext({ mwn: async () => mock as never }) };
+	return { mock, ctx: contextOn(mock) };
 }
 
 function sentBody(mock: MockMwn): Record<string, unknown> {
@@ -22,13 +32,13 @@ function sentBody(mock: MockMwn): Record<string, unknown> {
 }
 
 describe('neowiki-create-subject', () => {
-	it('resolves a title and posts a child subject with a CSRF token', async () => {
+	it('resolves a title and posts another subject of the page with a CSRF token', async () => {
 		const mock = createMockMwn({
 			request: vi.fn().mockResolvedValue({ query: { pages: [{ pageid: 7, title: 'Berlin' }] } }),
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockResolvedValue({ data: { status: 'created', subjectId: 's1demo' } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		const result = await neowikiCreateSubject.handle(
 			{ title: 'Berlin', label: 'Berlin', schema: 'City', statements: stmts },
 			ctx,
@@ -39,7 +49,7 @@ describe('neowiki-create-subject', () => {
 			data: string;
 			headers: Record<string, string>;
 		};
-		expect(call.url).toBe('https://test.wiki/w/rest.php/neowiki/v0/page/7/childSubjects');
+		expect(call.url).toBe('https://test.wiki/w/rest.php/neowiki/v0/page/7/subjects');
 		expect(call.method).toBe('POST');
 		expect(call.headers['X-CSRF-TOKEN']).toBe('tok');
 		expect(JSON.parse(call.data)).toMatchObject({
@@ -59,7 +69,7 @@ describe('neowiki-create-subject', () => {
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockResolvedValue({ data: { status: 'created', subjectId: 's1' } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		await neowikiCreateSubject.handle(
 			{ pageId: 7, isMain: true, label: 'X', schema: 'City', statements: stmts },
 			ctx,
@@ -69,23 +79,82 @@ describe('neowiki-create-subject', () => {
 		);
 	});
 
-	it('surfaces a 201 error body as a conflict', async () => {
+	it('reports a page that already has a main subject as a conflict', async () => {
 		const mock = createMockMwn({
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi
 				.fn()
-				.mockResolvedValue({ data: { status: 'error', message: 'Subject already exists' } }),
+				.mockRejectedValue(httpError(409, { status: 'error', message: 'Subject already exists' })),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
-		const result = await neowikiCreateSubject.handle(
-			{ pageId: 7, isMain: true, label: 'X', schema: 'City', statements: stmts },
+		const ctx = contextOn(mock);
+		const result = await dispatch(
+			neowikiCreateSubject,
 			ctx,
-		);
+		)({ pageId: 7, isMain: true, label: 'X', schema: 'City', statements: stmts });
 		assertStructuredError(result, 'conflict');
 	});
 
+	it('writes dependent subjects in the same request', async () => {
+		const { mock, ctx } = contextWith(created);
+
+		await neowikiCreateSubject.handle(
+			{ pageId: 7, schema: 'Person', statements: stmts, dependentSubjects: [birth] },
+			ctx,
+		);
+
+		expect(sentBody(mock)).toMatchObject({ dependentSubjects: [birth] });
+	});
+
+	it('takes an empty label as no label', () => {
+		expect(neowikiCreateSubject.inputSchema.label.safeParse('').success).toBe(true);
+	});
+
+	it('creates a subject without a label when none is given', async () => {
+		const { mock, ctx } = contextWith(created);
+
+		await neowikiCreateSubject.handle({ pageId: 7, schema: 'City', statements: stmts }, ctx);
+
+		expect(sentBody(mock)).not.toHaveProperty('label');
+	});
+
+	it('returns the violations the write reported and the subject as saved', async () => {
+		const violation = {
+			propertyName: 'Country',
+			code: 'min-length',
+			args: [3],
+			severity: 'warning',
+			valuePartIndex: 0,
+		};
+		const { ctx } = contextWith({
+			status: 'created',
+			subjectId: 's1demo',
+			violations: [violation],
+			subject: {
+				id: 's1demo',
+				label: 'Berlin',
+				displayName: 'Berlin',
+				schema: 'City',
+				pageId: 7,
+				pageTitle: 'Berlin',
+				statements: { Country: { propertyType: 'text', value: ['DE'] } },
+			},
+		});
+		const result = await neowikiCreateSubject.handle(
+			{ pageId: 7, label: 'Berlin', schema: 'City', statements: stmts },
+			ctx,
+		);
+
+		expect(result.structuredContent).toMatchObject({
+			violations: [violation],
+			subject: {
+				displayName: 'Berlin',
+				statements: [{ property: 'Country', type: 'text', value: ['DE'] }],
+			},
+		});
+	});
+
 	it('rejects when neither title nor pageId is given', async () => {
-		const ctx = fakeContext({ mwn: async () => createMockMwn() as never });
+		const ctx = contextOn(createMockMwn());
 		const result = await neowikiCreateSubject.handle(
 			{ label: 'X', schema: 'City', statements: stmts },
 			ctx,
@@ -97,7 +166,7 @@ describe('neowiki-create-subject', () => {
 		const mock = createMockMwn({
 			request: vi.fn().mockResolvedValue({ query: { pages: [{ missing: true, title: 'Nope' }] } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		const result = await neowikiCreateSubject.handle(
 			{ title: 'Nope', label: 'X', schema: 'City', statements: stmts },
 			ctx,
@@ -106,7 +175,7 @@ describe('neowiki-create-subject', () => {
 	});
 
 	it('attributes the write to the tool that made it, after the caller comment', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(created);
 
 		await neowikiCreateSubject.handle(
 			{ pageId: 7, label: 'X', schema: 'City', statements: stmts, comment: 'seed the city' },
@@ -122,7 +191,7 @@ describe('neowiki-create-subject', () => {
 	});
 
 	it('attributes a write the caller gave no comment for', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(created);
 
 		await neowikiCreateSubject.handle(
 			{ pageId: 7, label: 'X', schema: 'City', statements: stmts },
@@ -135,7 +204,7 @@ describe('neowiki-create-subject', () => {
 	});
 
 	it('drops the attribution for a wiki that opts out of it', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(created);
 
 		await neowikiCreateSubject.handle(
 			{ pageId: 7, label: 'X', schema: 'City', statements: stmts, comment: 'seed the city' },
@@ -146,7 +215,7 @@ describe('neowiki-create-subject', () => {
 	});
 
 	it('sends no comment at all when a wiki opts out and the caller gave none', async () => {
-		const { mock, ctx } = contextWith();
+		const { mock, ctx } = contextWith(created);
 
 		await neowikiCreateSubject.handle(
 			{ pageId: 7, label: 'X', schema: 'City', statements: stmts },

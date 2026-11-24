@@ -9,38 +9,39 @@ Reference for unit tests, integration testing against a real wiki, and the local
 
 Tests use [Vitest](https://vitest.dev/). Each tool exports a `Tool<TSchema>` descriptor from `src/tools/<name>.ts`; tests import the descriptor and route through `dispatch( descriptor, ctx )` from `src/runtime/dispatcher.ts`.
 
-Build a `ToolContext` per test via `fakeContext()` from `tests/helpers/fakeContext.ts`. Override only the slices the test exercises — by default unstubbed methods throw, so tests fail loudly when they reach for something they didn't mean to:
+Build a `ToolContext` per test via `contextOn( mwn )` from `tests/helpers/fakeContext.ts`, which hands the tool a mock mwn, or `fakeContext()` for a test that never reaches the wiki. Override only the slices the test exercises — by default unstubbed methods throw, so tests fail loudly when they reach for something they didn't mean to:
 
 ```typescript
 import { describe, it, expect, vi } from 'vitest';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { contextOn } from '../helpers/fakeContext.ts';
 import { createMockMwn } from '../helpers/mock-mwn.ts';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import { getPage } from '../../src/tools/get-page.ts';
 
 it( 'returns page source', async () => {
-	const mwn = createMockMwn( { read: vi.fn().mockResolvedValue( /* … */ ) } );
-	const ctx = fakeContext( { mwn: async () => mwn as never } );
+	const mwn = createMockMwn( { request: vi.fn().mockResolvedValue( /* … */ ) } );
+	const ctx = contextOn( mwn );
 	const result = await getPage.handle( { title: 'Foo' /* … */ }, ctx );
 	// assertions
 } );
 
 it( 'maps missingtitle to not_found via the dispatcher', async () => {
-	const mwn = createMockMwn( { read: vi.fn().mockRejectedValue( /* … */ ) } );
-	const ctx = fakeContext( { mwn: async () => mwn as never } );
+	const mwn = createMockMwn( { request: vi.fn().mockRejectedValue( /* … */ ) } );
+	const ctx = contextOn( mwn );
 	const result = await dispatch( getPage, ctx )( { title: 'Missing' } );
 	// assertions
 } );
 ```
 
-Happy-path tests typically call `descriptor.handle( args, ctx )` directly. Error-classification tests go through `dispatch( descriptor, ctx )` so the dispatcher's classification + special-case + format.error pipeline runs end-to-end. Tests asserting on what the schema itself accepts or refuses go through `callTool` instead, since neither `handle` nor `dispatch` parses raw arguments against it.
+Happy-path tests typically call `descriptor.handle( args, ctx )` directly. Error-classification tests go through `dispatch( descriptor, ctx )` so the dispatcher's classification + tailored-wording + format.error pipeline runs end-to-end. Tests asserting on what the schema itself accepts or refuses go through `callTool` instead, since neither `handle` nor `dispatch` parses raw arguments against it.
 
-Use `createMockMwn()` from `tests/helpers/mock-mwn.ts` to create mock `mwn` instances with method overrides. See existing test files under `tests/tools/` for the full pattern.
+Use `createMockMwn()` from `tests/helpers/mock-mwn.ts` to create mock `mwn` instances with method overrides. See existing test files under `tests/tools/` for the full pattern. For a tool that writes, use `writingWiki()` with `contextWritingTo()` from `tests/helpers/writingWiki.ts`: a real `mwn` whose wiki records each write it receives, uploads included.
 
 Reach for a shared fixture rather than spelling a literal out. A field added to the real type then breaks in one place, instead of drifting silently through every suite that happened to write the literal by hand:
 
 - `fakeLogger()` — a `Logger` double covering all eight levels.
 - `fakeProxyConfig()` — a complete `ProxyConfig`.
+- `withWikiConfig( ctx, config )` — the same context, its wiki configured with `config`.
 - `mockedLookupAll()` — the `node:dns/promises` `lookup` mock, typed at the `{ all: true }` overload production calls.
 - `toolArgs( tool, partial )` — runs partial input through a tool's own schema, so `.default()` values arrive the way a real call delivers them.
 
@@ -69,6 +70,16 @@ Like the MCP Inspector, but with a built-in MCP client that can drive the server
 ```sh
 npm run mcpjam
 ```
+
+## MCPJam CLI checks
+
+Token-free structural checks against the built server: a stdio doctor sweep plus an MCP protocol conformance run against the HTTP transport. Build first with `npm run build`, then:
+
+```sh
+npm run check:mcp
+```
+
+Both use the minimal wiki configuration in `scripts/mcp-checks.config.json`, so results do not depend on your local `config.json`. The conformance run binds `127.0.0.1:3117`; set `PORT` to use a different port. CI runs the same script on every pull request, and additionally diffs the tool surface against the PR base — a removed or renamed tool fails the job, while description changes only show up in the report.
 
 ## MCP Inspector CLI (integration tests)
 
@@ -136,7 +147,7 @@ To create a bot password on a local MediaWiki running in Docker:
 ```bash
 docker exec <container> php /var/www/html/maintenance/run.php createBotPassword \
   --appid mcp-server \
-  --grants 'basic,highvolume,editpage,editprotected,createeditmovepage,delete,protect,uploadfile,uploadeditmovefile' \
+  --grants 'basic,highvolume,editpage,editprotected,createeditmovepage,delete,protect,uploadfile,uploadeditmovefile,cargo' \
   <username>
 ```
 

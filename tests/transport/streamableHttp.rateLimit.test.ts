@@ -8,10 +8,10 @@ import { describe, it, expect } from 'vitest';
 import request from 'supertest';
 import { McpServer } from '@modelcontextprotocol/server';
 import { buildApp, type BuildAppDeps } from '../../src/transport/streamableHttp.ts';
-import { createAppState } from '../../src/wikis/state.ts';
-import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
 import { createRateLimiter } from '../../src/transport/rateLimit.ts';
 import { RATE_LIMITED_ERROR_CODE } from '../../src/transport/errorCodes.ts';
+import { fakeAppDeps } from '../helpers/fakeAppDeps.ts';
+import { liveMetrics, scrape } from '../helpers/metrics.ts';
 
 const SETTINGS = {
 	ratePerSecond: 1,
@@ -27,28 +27,7 @@ const SETTINGS = {
 const frozenClock = () => 1_000_000;
 
 function makeDeps(calls: { count: number }): BuildAppDeps {
-	return {
-		state: createAppState({
-			defaultWiki: 'test',
-			wikis: {
-				test: {
-					sitename: 'Test Wiki',
-					server: 'http://wiki.invalid',
-					articlepath: '/wiki',
-					scriptpath: '/w',
-					token: null,
-					username: null,
-					password: null,
-				},
-			},
-			uploadDirs: [],
-		}),
-		getProxyConfig: () => null,
-		proxyStore: new InMemoryProxyStore(),
-		proxyRedirectPolicy: null,
-		cimdResolver: null,
-		defaultWikiKey: 'test',
-		defaultWikiSitename: 'Test Wiki',
+	return fakeAppDeps({
 		createServerFn: () => {
 			const server = new McpServer(
 				{ name: 'rl-app', version: '0.0.0' },
@@ -60,12 +39,8 @@ function makeDeps(calls: { count: number }): BuildAppDeps {
 			});
 			return server;
 		},
-		host: '127.0.0.1',
-		allowedHosts: undefined,
-		allowedOrigins: [],
-		maxRequestBody: '1mb',
 		rateLimiter: createRateLimiter(SETTINGS, frozenClock),
-	};
+	});
 }
 
 const call = (id: number) => ({
@@ -88,6 +63,19 @@ describe('rate limiting through the real app', () => {
 		expect(refused.headers['retry-after']).toBeDefined();
 		expect(refused.body).toMatchObject({ error: { code: RATE_LIMITED_ERROR_CODE } });
 		expect(calls.count).toBe(2);
+	});
+
+	it('counts the refusal in mcp_rate_limited_total', async () => {
+		const metrics = liveMetrics();
+		const { app } = buildApp({ ...makeDeps({ count: 0 }), metrics });
+		const send = () =>
+			request(app).post('/mcp').set('Accept', 'application/json, text/event-stream').send(call(1));
+
+		await send();
+		await send();
+		await send();
+
+		expect(await scrape(metrics)).toContain('mcp_rate_limited_total{caller="anonymous"} 1');
 	});
 
 	it('meters a Content-Type that body-parser would not parse by default', async () => {

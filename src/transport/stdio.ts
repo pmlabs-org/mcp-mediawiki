@@ -4,23 +4,33 @@ import { serveStdio } from '@modelcontextprotocol/server/stdio';
 import { logger } from '../runtime/logger.ts';
 import { createServer } from '../server.ts';
 import { emitStartupBanner } from '../runtime/banner.ts';
-import { createToolContext } from '../runtime/createContext.ts';
+import { createSharedContext } from '../runtime/createContext.ts';
 import { registerShutdownHandlers } from '../runtime/shutdown.ts';
 import { loadConfigFromFile } from '../config/loadConfig.ts';
 import { createAppState } from '../wikis/state.ts';
+import { readAuthPolicy } from '../runtime/authShape.ts';
+import { StdioSignIn } from '../auth/stdioSignIn.ts';
+import { readMetrics } from '../runtime/metrics.ts';
 
 async function main(): Promise<void> {
 	const config = loadConfigFromFile();
 	const state = createAppState(config);
+	const auth = readAuthPolicy(process.env, 'stdio', null, new StdioSignIn());
 	emitStartupBanner(
 		{ transport: 'stdio' },
 		{
 			wikiRegistry: state.wikiRegistry,
-			activeWiki: state.activeWiki,
+			defaultWikiKey: state.defaultWikiKey,
 			uploadDirs: state.uploadDirs,
+			auth,
 		},
 	);
-	const ctx = createToolContext({ logger, state, transport: 'stdio' });
+	const ctx = createSharedContext({
+		logger,
+		state,
+		auth,
+		metrics: readMetrics(process.env, 'stdio'),
+	});
 
 	// serveStdio owns the connection: the opening exchange pins the era, one
 	// instance from the factory serves the connection's lifetime, and on a

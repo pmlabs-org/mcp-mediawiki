@@ -1,10 +1,11 @@
-import { errorMessage } from '../errors/isErrnoException.ts';
+import { errorMessage } from '../errors/errorMessage.ts';
 import { WikiTimeoutError } from '../errors/wikiTimeoutError.ts';
 import type { CallDeadline } from '../runtime/callDeadline.ts';
-import { makeApiRequest, fetchPageHtml } from '../transport/httpFetch.ts';
-import { assertPublicDestination } from '../transport/ssrfGuard.ts';
+import { makeApiRequest, fetchPageHtml } from '../outbound/httpFetch.ts';
+import { assertPublicDestination } from '../outbound/ssrfGuard.ts';
 import { logger } from '../runtime/logger.ts';
 import { normalizeServer } from './normalizeServer.ts';
+import { normalizeArticlePath } from './articlePath.ts';
 
 const COMMON_SCRIPT_PATHS = ['/w', ''];
 
@@ -83,7 +84,7 @@ async function fetchWikiInfoFromApi(
 	return {
 		sitename: general.sitename,
 		scriptpath: general.scriptpath,
-		articlepath: general.articlepath.replace('/$1', ''),
+		articlepath: normalizeArticlePath(general.articlepath),
 		server: normalizeServer(general.server),
 		servername: general.servername,
 	};

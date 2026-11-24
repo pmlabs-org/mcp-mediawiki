@@ -10,6 +10,10 @@ export interface StoredToken {
 	expires_at: string;
 	scopes: string[];
 	obtained_at: string;
+	// The OAuth issuer that granted the token, so it is neither sent to nor
+	// refreshed at a different wiki later configured under the same key. Absent
+	// on tokens saved before it was recorded, which are still used.
+	issuer?: string;
 }
 
 export interface CredentialsFile {
@@ -23,9 +27,11 @@ export interface TokenStore {
 	delete(wikiKey: string): Promise<void>;
 }
 
-export function createTokenStore(): TokenStore {
-	let writeChain: Promise<void> = Promise.resolve();
+// Every store in the process writes the same file, so the queue that keeps one
+// read-modify-write from interleaving with another has to be shared too.
+let writeChain: Promise<void> = Promise.resolve();
 
+export function createTokenStore(): TokenStore {
 	async function read(): Promise<CredentialsFile> {
 		const file = getCredentialsPath();
 		let raw: string;

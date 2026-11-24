@@ -1,17 +1,17 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { LookupAddress } from 'node:dns';
 
-vi.mock('../../src/transport/httpFetch.ts', () => ({
+vi.mock('../../src/outbound/httpFetch.ts', () => ({
 	makeApiRequest: vi.fn(),
 	fetchPageHtml: vi.fn(),
 }));
 
-vi.mock('../../src/transport/ssrfGuard.ts', () => ({
+vi.mock('../../src/outbound/ssrfGuard.ts', () => ({
 	assertPublicDestination: vi.fn(),
 }));
 
-import { makeApiRequest, fetchPageHtml } from '../../src/transport/httpFetch.ts';
-import { assertPublicDestination } from '../../src/transport/ssrfGuard.ts';
+import { makeApiRequest, fetchPageHtml } from '../../src/outbound/httpFetch.ts';
+import { assertPublicDestination } from '../../src/outbound/ssrfGuard.ts';
 import { discoverWiki } from '../../src/wikis/wikiDiscovery.ts';
 import { WikiTimeoutError } from '../../src/errors/wikiTimeoutError.ts';
 import { callDeadline, WIKI_CONNECT_TIMEOUT_MS } from '../../src/runtime/callDeadline.ts';
@@ -131,9 +131,9 @@ describe('discoverWiki', () => {
 	});
 
 	it('reports running out of time as a timeout, not as a URL that is not a wiki', async () => {
-		// What an expired budget actually produces: `AbortSignal.timeout`'s reason
-		// is a TimeoutError, and node-fetch raises AbortError. Driven directly so
-		// the test does not wait out the real budget.
+		// What an expired budget actually produces: `AbortSignal.timeout`'s reason,
+		// a TimeoutError, which the HTTP client rejects with. Driven directly so the
+		// test does not wait out the real budget.
 		vi.mocked(makeApiRequest).mockRejectedValue(
 			new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
 		);

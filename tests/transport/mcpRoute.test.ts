@@ -7,15 +7,17 @@ import {
 	createMcpRouteHandler,
 	extractBearerToken,
 	type McpRouteOptions,
-	type ProxyConfigGetter,
 } from '../../src/transport/mcpRoute.ts';
 import { createRateLimiter } from '../../src/transport/rateLimit.ts';
 import { RATE_LIMITED_ERROR_CODE } from '../../src/transport/errorCodes.ts';
 import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
 import { mintAccessToken } from '../../src/auth/authorizationServer/jwt.ts';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
 import { getRuntimeToken } from '../../src/runtime/requestContext.ts';
 import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
+import { readAuthPolicy } from '../../src/runtime/authShape.ts';
+import { liveMetrics, metricsOff, scrape } from '../helpers/metrics.ts';
 
 afterEach(() => {
 	vi.unstubAllEnvs();
@@ -69,7 +71,10 @@ function buildEraApp(): Express {
 		},
 		{ legacy: 'stateless' },
 	);
-	const route = createMcpRouteHandler(handler);
+	const route = createMcpRouteHandler(handler, {
+		auth: readAuthPolicy(process.env, 'http', null, null),
+		metrics: metricsOff(),
+	});
 	app.post('/mcp', route);
 	app.get('/mcp', route);
 	app.delete('/mcp', route);
@@ -131,14 +136,21 @@ describe('bearer threading through the route', () => {
 		const fakeHandler = {
 			fetch: async (): Promise<Response> => {
 				captured.seen = true;
-				captured.token = getRuntimeToken();
+				captured.token = getRuntimeToken('test');
 				return new Response(JSON.stringify({ ok: true }), {
 					status: 200,
 					headers: { 'content-type': 'application/json' },
 				});
 			},
 		};
-		app.post('/mcp', createMcpRouteHandler(fakeHandler, { wikiRegistry: oauthRegistry() }));
+		app.post(
+			'/mcp',
+			createMcpRouteHandler(fakeHandler, {
+				auth: readAuthPolicy(process.env, 'http', null, null),
+				wikiRegistry: oauthRegistry(),
+				metrics: metricsOff(),
+			}),
+		);
 		return app;
 	}
 
@@ -162,7 +174,7 @@ describe('bearer threading through the route', () => {
 		const fakeHandler = {
 			fetch: async (): Promise<Response> => {
 				captured.seen = true;
-				captured.token = getRuntimeToken();
+				captured.token = getRuntimeToken('test');
 				return new Response(JSON.stringify({ ok: true }), {
 					status: 200,
 					headers: { 'content-type': 'application/json' },
@@ -175,7 +187,14 @@ describe('bearer threading through the route', () => {
 			getAll: () => ({ ex: { sitename: 'Ex' } }),
 			get: () => ({ sitename: 'Ex' }),
 		} as unknown as WikiRegistry;
-		app.post('/mcp', createMcpRouteHandler(fakeHandler, { wikiRegistry: registry }));
+		app.post(
+			'/mcp',
+			createMcpRouteHandler(fakeHandler, {
+				auth: readAuthPolicy(process.env, 'http', null, null),
+				wikiRegistry: registry,
+				metrics: metricsOff(),
+			}),
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -245,7 +264,9 @@ describe('rate limiting on /mcp', () => {
 		app.post(
 			'/mcp',
 			createMcpRouteHandler(fakeHandler, {
+				auth: readAuthPolicy(process.env, 'http', null, null),
 				rateLimiter: createRateLimiter(SETTINGS, frozenClock),
+				metrics: metricsOff(),
 				...options,
 			}),
 		);
@@ -340,12 +361,21 @@ describe('rate limiting on /mcp', () => {
 		expect((await asBearer('token-a', 90)).status).toBe(429);
 	});
 
+	it('counts a refusal of an authenticated caller under its own label', async () => {
+		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
+		const metrics = liveMetrics();
+		const app = buildLimitedApp({ calls: 0 }, { metrics });
+
+		for (let i = 0; i <= SETTINGS.burst; i++) {
+			await request(app).post('/mcp').set('Authorization', 'Bearer token-a').send(toolsCall(i));
+		}
+
+		expect(await scrape(metrics)).toContain('mcp_rate_limited_total{caller="caller"} 1');
+	});
+
 	it('keys proxy callers by their upstream token id', async () => {
 		const store = new InMemoryProxyStore();
-		const pcLocal = {
-			issuer: 'https://wiki.example/mcp',
-			signingKey: 'k'.repeat(32),
-		} as unknown as ProxyConfig;
+		const pcLocal = fakeProxyConfig({ signingKey: 'k'.repeat(32) });
 		const mint = async (accessToken: string) =>
 			mintAccessToken({
 				issuer: pcLocal.issuer,
@@ -359,8 +389,7 @@ describe('rate limiting on /mcp', () => {
 
 		const captured = { calls: 0 };
 		const app = buildLimitedApp(captured, {
-			getProxyConfig: (() => pcLocal) as ProxyConfigGetter,
-			proxyStore: store,
+			auth: readAuthPolicy(process.env, 'http', fakeHostedProxy(pcLocal, store), null),
 		});
 		const asJwt = (jwt: string, id: number) =>
 			request(app).post('/mcp').set('Authorization', `Bearer ${jwt}`).send(toolsCall(id));
@@ -414,7 +443,11 @@ describe('rate limiting cannot be bypassed by request shape', () => {
 		);
 		app.post(
 			'/mcp',
-			createMcpRouteHandler(handler, { rateLimiter: createRateLimiter(SETTINGS, frozenClock) }),
+			createMcpRouteHandler(handler, {
+				auth: readAuthPolicy(process.env, 'http', null, null),
+				rateLimiter: createRateLimiter(SETTINGS, frozenClock),
+				metrics: metricsOff(),
+			}),
 		);
 		return app;
 	}

@@ -1,6 +1,6 @@
 import { ResourceNotFoundError, ResourceTemplate } from '@modelcontextprotocol/server';
 import type { McpServer, Resource } from '@modelcontextprotocol/server';
-import type { ToolContext } from '../runtime/context.ts';
+import type { SharedContext } from '../runtime/context.ts';
 import type { WikiConfig, PublicWikiConfig } from '../config/loadConfig.ts';
 import { WIKI_RESOURCE_URI_PREFIX } from '../runtime/constants.ts';
 import { resolveSiteInfo } from '../wikis/siteInfo.ts';
@@ -10,7 +10,7 @@ import { decodeWikiKey, encodeWikiKey } from '../runtime/wikiKey.ts';
 // WikiConfig field is private until someone adds it here. Credentials
 // (`token`, `username`, `password`, `oauth2ClientSecret`) and server-side
 // operational settings (`publicServer`, `oauth2CallbackPort`, `tags`,
-// `attributeEdits`, `oauth2ClientId`) are all absent by construction.
+// `attributeEdits`, `bot`, `oauth2ClientId`) are all absent by construction.
 // Undefined optional fields drop out of the JSON body, as before.
 function toPublicConfig(wikiConfig: Readonly<WikiConfig>): PublicWikiConfig {
 	return {
@@ -23,23 +23,18 @@ function toPublicConfig(wikiConfig: Readonly<WikiConfig>): PublicWikiConfig {
 	};
 }
 
-export function registerAllResources(server: McpServer, ctx: ToolContext): void {
+export function registerAllResources(server: McpServer, ctx: SharedContext): void {
 	const resourceTemplate = new ResourceTemplate(`${WIKI_RESOURCE_URI_PREFIX}{wikiKey}`, {
-		list: () => {
-			const allWikis = ctx.wikis.getAll();
-			const resources: Resource[] = [];
-			for (const wikiKey in allWikis) {
-				const wikiConfig = allWikis[wikiKey];
-				resources.push({
+		// Every wiki is probed at startup, so listing mostly reads the probe's
+		// cache rather than the wikis.
+		list: async () => {
+			const resources: Resource[] = await Promise.all(
+				Object.entries(ctx.wikis.getAll()).map(async ([wikiKey, wikiConfig]) => ({
 					uri: `${WIKI_RESOURCE_URI_PREFIX}${encodeWikiKey(wikiKey)}`,
 					name: `wikis/${wikiKey}`,
-					// Cache read only — listing must not fan out a siteinfo fetch per
-					// wiki, so the description shows the configured server until a
-					// resource read warms the cache. The authoritative public server
-					// is resolved in the content handler below.
-					description: `Wiki "${wikiConfig.sitename}" hosted at ${ctx.siteInfoCache.get(wikiKey)?.server ?? wikiConfig.server}`,
-				});
-			}
+					description: `Wiki "${wikiConfig.sitename}" hosted at ${(await resolveSiteInfo(ctx, wikiKey)).server}`,
+				})),
+			);
 			return { resources };
 		},
 	});

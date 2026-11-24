@@ -21,12 +21,13 @@ Every tool that operates on a wiki accepts an optional `wiki` argument naming th
 | `get-page` | Fetch a wiki page. |
 | `get-page-history` | List recent revisions of a wiki page. |
 | `get-pages` | Fetch multiple wiki pages in one call (up to 50). |
+| `get-random-pages` | List a random sample of wiki pages from one namespace (main by default, redirects excluded by default, up to 500 per call). |
 | `get-recent-changes` | List recent change events across the wiki, filterable by timestamp, namespace, user, tag, type, and hide flags (up to 50 per call, paginated via `continue`). |
 | `get-revision` | Fetch a specific revision of a page. |
 | `get-site-info` | Get a wiki's key settings: MediaWiki version, content language, title-case rules, namespaces, installed extensions, license, and (optionally) statistics. |
 | `list-wikis` | List every configured wiki — its key, sitename, server, whether it is read-only or the default, whether it is reachable, which extension-gated tools work on it, and, for an OAuth-configured wiki, its authorization server. Disabled when fewer than two wikis are configured. |
 | `parse-wikitext` | Render wikitext to HTML without saving. Returns parse warnings, wikilinks, templates, and external URLs. |
-| `search-page` | Search wiki page titles and contents (full-text). Searches the main namespace unless given other namespace IDs. |
+| `search-page` | Search wiki page titles and contents (full-text). Searches the wiki's content namespaces unless given other namespace IDs. |
 | `search-page-by-prefix` | Search page titles by prefix. |
 | `whoami` | Report the identity the current session is authenticated as on the targeted wiki — username, whether it is anonymous, and group memberships (optionally user rights). |
 
@@ -70,14 +71,15 @@ Each pack's tools register only on wikis where its extension is installed.
 | `neowiki-list-schemas` | List schemas (entity types) and their property counts. |
 | `neowiki-get-schema` | Get one schema's property definitions, relations, and select options. |
 | `neowiki-cypher-query` | Run a read-only Cypher query against the knowledge graph. |
-| `neowiki-search-subjects` | Find subject IDs by label within a schema. |
+| `neowiki-search-subjects` | Find subject IDs by name, in one schema or all. |
 | `neowiki-get-subject` | Fetch one subject's structured data by ID. |
 | `neowiki-get-page-subjects` | List the subjects attached to a wiki page. |
-| `neowiki-create-subject` | Create a subject (child or main) on a page. Requires the `edit` right. |
+| `neowiki-create-subject` | Create a subject (main or other) on a page. Requires the `edit` right. |
 | `neowiki-update-subject` | Replace a subject's label and statements. Requires the `edit` right. |
 | `neowiki-delete-subject` | Delete a subject by ID. Requires the `edit` right. |
 | `neowiki-set-main-subject` | Set or clear a page's main subject. Requires the `edit` right. |
 | `neowiki-validate-subject` | Dry-run validate a proposed subject and return violations. |
+| `neowiki-mint-subject-ids` | Mint unused subject IDs for dependent subjects written with their host. |
 
 **[Semantic MediaWiki](https://www.mediawiki.org/wiki/Extension:Semantic_MediaWiki)**
 
@@ -169,9 +171,9 @@ Create a `config.json` file to configure wiki connections. Use the `config.examp
 }
 ```
 
-**Internal vs public address.** The `server` you configure may be an internal hostname (e.g. `http://mediawiki` in Docker); URLs handed back to the caller are built from the wiki's public address, so internal hostnames don't leak into links. See [docs/configuration.md — per-wiki fields](docs/configuration.md#per-wiki-fields).
+**Internal vs public address.** The `server` you configure may be an internal hostname (e.g. `http://mediawiki` in Docker); URLs handed back to the caller are built from the wiki's public address, so internal hostnames don't leak into links, once the internal host is listed in `MCP_TRUSTED_HOSTS`. See [docs/configuration.md — per-wiki fields](docs/configuration.md#per-wiki-fields).
 
-For the full field reference, env-var substitution, secret sources, change tags, upload directories, and authentication options, see [docs/configuration.md](docs/configuration.md).
+For the full field reference, env-var substitution, secret sources, change tags, bot edits, upload directories, and authentication options, see [docs/configuration.md](docs/configuration.md).
 
 ## Authentication
 
@@ -183,7 +185,7 @@ Tools marked 🔐 require authentication. Write tools (including extension-pack 
 - **Manual OAuth2 access token.** Paste a long-lived token into `config.json`. See [docs/configuration.md — manual OAuth2 access token](docs/configuration.md#manual-oauth2-access-token).
 - **Bot password.** Fallback when Extension:OAuth isn't installed. See [docs/configuration.md — bot password](docs/configuration.md#bot-password).
 
-The Cargo tools (`cargo-query`, `cargo-list-tables`, `cargo-describe-table`) call API actions gated by the `runcargoqueries` user right. Most wikis grant this to all users by default; wikis that restrict it require the **`Create, query and delete data through the Cargo extension`** grant on the bot password or OAuth consumer. The Cargo extension is also detected on wiki.gg-hosted wikis (Helldivers, Terraria, Ark, etc.), where it ships under the rebranded name `LIBRARIAN`.
+`cargo-query` needs the **`Create, query and delete data through the Cargo extension`** grant on a bot password or OAuth consumer, even on a wiki that lets every user run Cargo queries. The Cargo extension is also detected on wiki.gg wikis, which run `LIBRARIAN`, wiki.gg's fork of Cargo.
 
 ## Installation
 

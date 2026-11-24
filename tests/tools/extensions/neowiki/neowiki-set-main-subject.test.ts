@@ -1,22 +1,18 @@
 import { describe, it, expect, vi } from 'vitest';
 import { createMockMwn, type MockMwn } from '../../../helpers/mock-mwn.ts';
-import { fakeContext, withoutEditAttribution } from '../../../helpers/fakeContext.ts';
+import { withoutEditAttribution, contextOn } from '../../../helpers/fakeContext.ts';
 import type { ToolContext } from '../../../../src/runtime/context.ts';
 import { neowikiSetMainSubject } from '../../../../src/tools/extensions/neowiki/neowiki-set-main-subject.ts';
 import { assertStructuredError } from '../../../helpers/structuredResult.ts';
-
-function httpError(status: number, data: unknown): Error & { response: unknown } {
-	const err = new Error(`HTTP ${status}`) as Error & { response: unknown };
-	err.response = { status, data };
-	return err;
-}
+import { httpError } from '../../../helpers/httpError.ts';
+import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 
 function contextWith(): { mock: MockMwn; ctx: ToolContext } {
 	const mock = createMockMwn({
 		getCsrfToken: vi.fn().mockResolvedValue('tok'),
 		rawRequest: vi.fn().mockResolvedValue({ data: { status: 'changed' } }),
 	});
-	return { mock, ctx: fakeContext({ mwn: async () => mock as never }) };
+	return { mock, ctx: contextOn(mock) };
 }
 
 function sentBody(mock: MockMwn): Record<string, unknown> {
@@ -31,7 +27,7 @@ describe('neowiki-set-main-subject', () => {
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockResolvedValue({ data: { status: 'changed' } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		const result = await neowikiSetMainSubject.handle({ pageId: 7, subjectId: 's1demo' }, ctx);
 		const call = mock.rawRequest.mock.calls[0][0] as { url: string; method: string; data: string };
 		expect(call.url).toBe('https://test.wiki/w/rest.php/neowiki/v0/page/7/mainSubject');
@@ -45,7 +41,7 @@ describe('neowiki-set-main-subject', () => {
 			getCsrfToken: vi.fn().mockResolvedValue('tok'),
 			rawRequest: vi.fn().mockResolvedValue({ data: { status: 'changed' } }),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
+		const ctx = contextOn(mock);
 		await neowikiSetMainSubject.handle({ pageId: 7, subjectId: null }, ctx);
 		expect(JSON.parse((mock.rawRequest.mock.calls[0][0] as { data: string }).data)).toMatchObject({
 			subjectId: null,
@@ -99,7 +95,7 @@ describe('neowiki-set-main-subject', () => {
 	});
 
 	it('rejects when neither title nor pageId is given', async () => {
-		const ctx = fakeContext({ mwn: async () => createMockMwn() as never });
+		const ctx = contextOn(createMockMwn());
 		const result = await neowikiSetMainSubject.handle({ subjectId: 's1' }, ctx);
 		assertStructuredError(result, 'invalid_input');
 	});
@@ -113,8 +109,8 @@ describe('neowiki-set-main-subject', () => {
 					httpError(404, { status: 'error', message: 'Subject not found on this page' }),
 				),
 		});
-		const ctx = fakeContext({ mwn: async () => mock as never });
-		const result = await neowikiSetMainSubject.handle({ pageId: 7, subjectId: 'sX' }, ctx);
+		const ctx = contextOn(mock);
+		const result = await dispatch(neowikiSetMainSubject, ctx)({ pageId: 7, subjectId: 'sX' });
 		assertStructuredError(result, 'not_found');
 	});
 });

@@ -13,9 +13,9 @@ Which role is active depends on configuration. The proxy path turns on only when
 - `mwOauth2Endpoints.ts` — build a wiki's `rest.php/oauth2/{authorize,access_token}` URLs. Single source of truth for those paths, shared with the proxy side.
 - `oauthFlow.ts` — the low-level token exchange and refresh HTTP calls, plus the error classifier (`invalid_grant` / `invalid_client` / transient / malformed).
 - `upstreamBearer.ts` — resolve a proxy-minted `/mcp` JWT to the stored upstream wiki token it stands for, proactively refreshing near-expiry tokens with per-token coalescing. Used by the HTTP transport's request guard; bridges the two roles.
-- `acquireToken.ts` — orchestrate acquiring a token for a wiki (discovery → browser login → store).
+- `stdioSignIn.ts` — `StdioSignIn`, created once by the stdio transport: acquire a token for a wiki (stored, refreshed, or by browser login), one acquisition per wiki at a time.
 - `browserAuth.ts` — the interactive login: open the browser, catch the redirect on a loopback listener.
-- `tokenRefresh.ts` — refresh a stored token when it is near expiry, with per-wiki dedup.
+- `tokenRefresh.ts` — refresh a stored token when it is near expiry.
 - `tokenStore.ts` — persist and read back acquired tokens on disk.
 - `protectedResource.ts` — build the protected-resource metadata this server advertises to MCP clients.
 - `pkce.ts` — PKCE verifier / challenge helpers (used by both roles).
@@ -24,6 +24,7 @@ Which role is active depends on configuration. The proxy path turns on only when
 ## Authorization server side (`authorizationServer/`, the hosted proxy)
 
 - `proxyConfig.ts` — resolve the proxy config from a wiki plus environment. `ProxyWikiInput` is the wiki slice it needs (distinct from the client-side `WikiSlice`).
+- `hostedProxy.ts` — `HostedProxy`, the proxy's config, store, redirect policy and CIMD resolver, started once with the HTTP server; and the paths its endpoints are mounted at.
 - `router.ts` — `mountAuthorizationServer` mounts every AS route on the Express app.
 - `asMetadata.ts` — build the RFC 8414 metadata document advertising this server as the authorization server (`AsMetadataDoc`).
 - `register.ts` — dynamic client registration.
@@ -33,6 +34,7 @@ Which role is active depends on configuration. The proxy path turns on only when
 - `token.ts` — the `/token` endpoint: authorization-code and refresh grants.
 - `jwt.ts` — mint and verify the proxy's own access / refresh JWTs, and sign / verify the consent cookie.
 - `cimd.ts` — client-id metadata documents: resolve a URL `client_id` into a client record, host-gated.
+- `cimdFetch.ts` — fetch a client-id metadata document: https only, SSRF-guarded, no redirects, size- and time-capped.
 - `redirectPolicy.ts` — redirect-URI matching and the registration-time redirect-URI allowlist (the CIMD _host_ allowlist lives in `cimd.ts`).
 - `proxyStore.ts` — the in-memory store (clients, transactions, codes, upstream tokens).
 - `proxyStoreCrypto.ts` — encrypt and decrypt the persisted store.

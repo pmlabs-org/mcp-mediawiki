@@ -2,17 +2,8 @@ import { z } from 'zod';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { Tool } from '../../../runtime/tool.ts';
 import type { ToolContext } from '../../../runtime/context.ts';
-import { neowikiRequest, neowikiErrorResult } from './neowikiRequest.ts';
-
-const statementSchema = z.object({
-	propertyType: z
-		.string()
-		.min(1)
-		.describe('Property type: text, url, date, datetime, select, number, boolean, or relation.'),
-	value: z
-		.unknown()
-		.describe('Value in the format for the propertyType (see neowiki-create-subject).'),
-});
+import { neowikiRequest } from './neowikiRequest.ts';
+import { statementsSchema } from './statements.ts';
 
 const inputSchema = {
 	id: z
@@ -29,16 +20,9 @@ const inputSchema = {
 		.describe(
 			'Schema name to validate a NEW subject against. Required when id is omitted; ignored when id is given.',
 		),
-	label: z
-		.string()
-		.describe(
-			'Proposed display label. May be empty — an empty label yields a label-required violation rather than an error.',
-		),
-	statements: z
-		.record(z.string(), statementSchema)
-		.describe(
-			'Proposed statement map (property name → { propertyType, value }). The key is propertyType, NOT the `type` read tools return.',
-		),
+	statements: statementsSchema.describe(
+		'Proposed statement map (property name → { propertyType, value }).',
+	),
 } as const;
 
 interface ValidateResponse {
@@ -48,7 +32,7 @@ interface ValidateResponse {
 export const neowikiValidateSubject: Tool<typeof inputSchema> = {
 	name: 'neowiki-validate-subject',
 	description:
-		'Dry-runs validation of a proposed NeoWiki Subject against its Schema and returns any violations WITHOUT writing. Enabled only when the wiki has NeoWiki installed. Provide id to validate an update to an existing Subject (its schema is used), or omit id and provide schema to validate a new Subject. Use before neowiki-create-subject / neowiki-update-subject to catch type mismatches, missing required properties, and the propertyType-vs-type footgun. Returns { violations: [] } when valid. Pre-1.0: the NeoWiki API may change without notice.',
+		"Dry-runs validation of a proposed NeoWiki Subject's statements against its Schema and returns any violations WITHOUT writing. Enabled only when the wiki has NeoWiki installed. Provide id to validate an update to an existing Subject (its schema is used), or omit id and provide schema to validate a new Subject. Use before neowiki-create-subject / neowiki-update-subject to catch type mismatches, missing required properties, and the propertyType-vs-type footgun. Returns { violations: [] } when valid; each violation carries a stable code, the propertyName it concerns, and a severity of error or warning. The rules for Dependent Subjects are checked only when a write runs. Pre-1.0: the NeoWiki API may change without notice.",
 	inputSchema,
 	annotations: {
 		title: 'Validate NeoWiki subject',
@@ -60,7 +44,7 @@ export const neowikiValidateSubject: Tool<typeof inputSchema> = {
 	failureVerb: 'validate NeoWiki subject',
 	target: (a) => a.id ?? a.schema ?? '',
 
-	async handle({ id, schema, label, statements }, ctx: ToolContext): Promise<CallToolResult> {
+	async handle({ id, schema, statements }, ctx: ToolContext): Promise<CallToolResult> {
 		if (id === undefined && schema === undefined) {
 			return ctx.format.invalidInput(
 				'Provide schema to validate a new subject, or id to validate an update.',
@@ -68,22 +52,18 @@ export const neowikiValidateSubject: Tool<typeof inputSchema> = {
 		}
 
 		const mwn = await ctx.mwn();
-		try {
-			const spec =
-				id !== undefined
-					? { path: `/subject/${encodeURIComponent(id)}/validate`, body: { label, statements } }
-					: { path: '/subject/validate', body: { schema, label, statements } };
+		const spec =
+			id !== undefined
+				? { path: `/subject/${encodeURIComponent(id)}/validate`, body: { statements } }
+				: { path: '/subject/validate', body: { schema, statements } };
 
-			// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- NeoWiki validate response shape; trusted at this boundary
-			const data = (await neowikiRequest(mwn, {
-				method: 'POST',
-				path: spec.path,
-				body: spec.body,
-			})) as ValidateResponse;
+		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- NeoWiki validate response shape; trusted at this boundary
+		const data = (await neowikiRequest(mwn, {
+			method: 'POST',
+			path: spec.path,
+			body: spec.body,
+		})) as ValidateResponse;
 
-			return ctx.format.ok({ violations: Array.isArray(data.violations) ? data.violations : [] });
-		} catch (err) {
-			return neowikiErrorResult(err, ctx);
-		}
+		return ctx.format.ok({ violations: Array.isArray(data.violations) ? data.violations : [] });
 	},
 };

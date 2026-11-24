@@ -4,7 +4,7 @@ import type { Tool } from '../../../runtime/tool.ts';
 import type { ToolContext } from '../../../runtime/context.ts';
 import type { TruncationInfo } from '../../../results/truncation.ts';
 import { capLinesByBytes } from '../../../results/truncation.ts';
-import { runSparqlQuery, SparqlError } from './sparql.ts';
+import { runSparqlQuery } from './sparql.ts';
 import { resolveSiteInfo } from '../../../wikis/siteInfo.ts';
 
 const HARD_LIMIT = 1000;
@@ -37,25 +37,10 @@ export const wikibaseQuery: Tool<typeof inputSchema> = {
 	target: (a) => a.query,
 
 	async handle({ query, limit }, ctx: ToolContext): Promise<CallToolResult> {
-		const { key } = ctx.activeWiki.get();
-		const endpoint = ((await resolveSiteInfo(ctx, key)).sparqlEndpoint ?? '').trim();
-		if (endpoint === '') {
-			// The pack's wikiGate refuses such a wiki centrally, before dispatch.
-			return ctx.format.invalidInput(
-				`Wiki "${key}" advertises no query service, so SPARQL cannot be run against it. Use list-wikis to see which wikis have one.`,
-			);
-		}
-
+		// The pack's wikiGate has refused a wiki that publishes none before dispatch.
+		const endpoint = ((await resolveSiteInfo(ctx, ctx.wiki.key)).sparqlEndpoint ?? '').trim();
 		const effectiveLimit = limit ?? HARD_LIMIT;
-		let results;
-		try {
-			results = await runSparqlQuery(endpoint, query, effectiveLimit);
-		} catch (err) {
-			if (err instanceof SparqlError) {
-				return ctx.format.error(err.category, err.message);
-			}
-			throw err;
-		}
+		const results = await runSparqlQuery(endpoint, query, effectiveLimit);
 
 		if (results.boolean !== undefined) {
 			return ctx.format.ok({ boolean: results.boolean });

@@ -8,12 +8,13 @@ Project context for AI coding agents working on this repo. For human users, star
 - `src/tools/extensions/<id>/` — extension packs: tools gated on a specific MediaWiki extension (SMW / Bucket / Cargo / …), grouped under a per-pack module.
 - `src/runtime/` — context, dispatcher, register, reconcile, logger, monotonic clock, constants, request-scoped context, auth-shape classifier.
 - `src/wikis/` — wiki registry, selection, mwn provider, discovery, error sanitiser.
-- `src/transport/` — stdio and streamable HTTP entry points, SSRF/upload guards, low-level HTTP helpers.
+- `src/transport/` — stdio and streamable HTTP entry points.
+- `src/outbound/` — the HTTP requests the server makes itself: SSRF guard, redirect handling, fetch helpers.
 - `src/auth/` — OAuth for MediaWiki, in two roles (client to a wiki, and the hosted authorization-server proxy). See [src/auth/README.md](src/auth/README.md).
 - `src/config/` — `config.json` loader and substitution.
 - `src/services/` — section, edit, revision, response services consumed via `ToolContext`.
 - `src/results/` — response shaping (truncation, format, schemas).
-- `src/errors/` — error classifier + per-tool special cases.
+- `src/errors/` — error classifier + wordings tools declare for some error codes (`tailoredErrors`).
 - `src/resources/` — MCP resources exposing `mcp://wikis/{wikiKey}`.
 - `src/server.ts`, `src/index.ts` — server factory and bootstrap.
 - `tests/` — vitest suites mirroring the source tree; shared helpers in `tests/helpers/`.
@@ -34,6 +35,7 @@ A path handed to a runtime `createRequire( import.meta.url )` resolves against t
 - `npm test` — run the vitest suite once.
 - `npm run lint` — oxlint.
 - `npm run typecheck` — `tsc --noEmit` over `src` **and** `tests`, via `tsconfig.lint.json`. `npm run build` only typechecks `src`, so this is the check that covers test code.
+- `npm run check:mcp` — MCPJam doctor + MCP protocol conformance against the built server (build first). CI runs it on every PR and also diffs the tool surface against the PR base, failing on breaking changes.
 - `npm run fmt` / `npm run fmt:check` — oxfmt (write / dry-run).
 - `npm run preflight` — full gate (install, lint, typecheck, fmt check, validate `server.json`, test, build, bundle). Run before a release.
 - Git hooks: `lefthook` auto-installs on `npm install`. Pre-commit runs `oxfmt` (auto-fix on staged files) + `oxlint`. Pre-push runs `npm run typecheck` + the test suite. Bypass with `--no-verify`.
@@ -81,7 +83,7 @@ A pack is a self-describing module exposing tools that share an extension gate. 
 
 A pack whose tools need a capability the extension list alone does not reveal — Wikibase's query service, which a repository publishes in its siteinfo — declares an optional `wikiGate` naming those tools, the predicate over the wiki's probed `WikiIdentity`, and the message a refused call carries; the rest of the pack is unaffected. Gate and extension are conjoined per wiki, so the gated tools are offered while some one wiki satisfies both, and the ungated tools of the same pack while any wiki has the extension. The gate is enforced centrally by the per-call capability guard, so no handler repeats it, and the tool names it lists are checked against the pack's own tools at startup.
 
-A pack whose extension adds error codes to the action API declares them as `errorCodes` (and `errorCodePrefixes` for a family the extension numbers per case), mapped to the category a caller should read them as. A tool that reaches the wiki through mwn never catches its own error — mwn throws and the dispatcher classifies — so the codes have to reach one central classifier; declaring them on the pack keeps the vocabulary with the code that produces it, so removing the pack removes its codes. `extensionErrorVocabulary` merges them and fails startup on a code two packs both claim or one MediaWiki already defines. A pack with its own transport, such as NeoWiki's REST client or `wikibase-query`'s SPARQL one, catches its own failures and carries the category on its error type instead.
+A pack whose extension adds error codes to the action API declares them as `errorCodes` (and `errorCodePrefixes` for a family the extension numbers per case), mapped to the category a caller should read them as. A tool that reaches the wiki through mwn never catches its own error — mwn throws and the dispatcher classifies — so the codes have to reach one central classifier; declaring them on the pack keeps the vocabulary with the code that produces it, so removing the pack removes its codes. `extensionErrorVocabulary` merges them and fails startup on a code two packs both claim or one MediaWiki already defines. A pack with its own transport, such as NeoWiki's REST client or `wikibase-query`'s SPARQL one, classifies its failures itself and throws them as a `ClassifiedError`, which the dispatcher reports like any other; its handlers do not catch them.
 
 Reconcile picks up the new pack automatically — no edits to `src/runtime/reconcile.ts`. README.md and CHANGELOG.md still need updating per the policy in "Adding or changing tools".
 
@@ -112,7 +114,7 @@ See [docs/distribution.md](docs/distribution.md) for the install channels, the C
 
 ## Testing
 
-Tool tests build a `ToolContext` via `fakeContext()` from `tests/helpers/fakeContext.ts` and dispatch through `dispatch( descriptor, ctx )`. Provide an `mwn` factory (typically `createMockMwn()` from `tests/helpers/mock-mwn.ts`) and override only the slices the test exercises. See [docs/testing.md](docs/testing.md) for the full pattern, MCP Inspector CLI examples, and the bot-password setup required to exercise authenticated tools against a local wiki.
+Tool tests build a `ToolContext` via `contextOn( mwn )` from `tests/helpers/fakeContext.ts`, around a mock wiki (typically `createMockMwn()` from `tests/helpers/mock-mwn.ts`), and dispatch through `dispatch( descriptor, ctx )`. Override only the slices the test exercises. See [docs/testing.md](docs/testing.md) for the full pattern, MCP Inspector CLI examples, and the bot-password setup required to exercise authenticated tools against a local wiki.
 
 ## Releasing
 

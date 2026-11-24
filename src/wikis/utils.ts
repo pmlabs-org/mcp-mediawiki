@@ -1,14 +1,19 @@
+import { Mwn } from 'mwn';
 import type { ToolContext } from '../runtime/context.ts';
+import { articlePathPattern } from './articlePath.ts';
 import { resolveSiteInfo } from './siteInfo.ts';
 
 export async function buildPageUrl(ctx: ToolContext, title: string): Promise<string> {
-	const { key } = ctx.activeWiki.get();
-	const { server, articlepath } = await resolveSiteInfo(ctx, key);
-	// MediaWiki convention: spaces become underscores. encodeURI preserves
-	// '/' (subpages) and ':' (namespace prefixes) while encoding spaces and
-	// non-ASCII characters. Characters disallowed in MW titles ('#', '?',
-	// '|', '[', ']', etc.) cannot reach this function via a real page title.
-	return `${server}${articlepath}/${encodeURI(title.replace(/ /g, '_'))}`;
+	const { server, articlepath } = await resolveSiteInfo(ctx, ctx.wiki.key);
+	// A replacer function, since a title may contain '$$'.
+	return (
+		server + articlePathPattern(articlepath).replace('$1', () => Mwn.util.wikiUrlencode(title))
+	);
+}
+
+/** Whether a write asks for a bot edit: the call's `bot` wins, else the wiki's `bot` setting. */
+export function resolveBotFlag(ctx: ToolContext, bot: boolean | undefined): boolean {
+	return bot ?? ctx.wiki.config.bot === true;
 }
 
 /**
@@ -24,7 +29,7 @@ export function formatEditComment(
 	comment?: string,
 ): string | undefined {
 	const given = comment === '' ? undefined : comment;
-	if (ctx.activeWiki.get().config.attributeEdits === false) {
+	if (ctx.wiki.config.attributeEdits === false) {
 		return given;
 	}
 	const suffix = `(via ${tool} on MediaWiki MCP Server)`;

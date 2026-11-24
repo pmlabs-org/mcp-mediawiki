@@ -3,6 +3,7 @@ import type { CallToolResult } from '@modelcontextprotocol/server';
 import type { ApiPage, ImageInfo } from 'mwn';
 import type { Tool } from '../runtime/tool.ts';
 import type { ToolContext } from '../runtime/context.ts';
+import { fileTitle } from '../wikis/fileTitle.ts';
 
 const inputSchema = {
 	title: z.string().describe('File title (with or without the "File:" prefix)'),
@@ -26,11 +27,9 @@ export const getFile: Tool<typeof inputSchema> = {
 	async handle({ title }, ctx: ToolContext): Promise<CallToolResult> {
 		const mwn = await ctx.mwn();
 
-		const fileTitle = title.startsWith('File:') ? title : `File:${title}`;
-
 		const response = await mwn.request({
 			action: 'query',
-			titles: fileTitle,
+			titles: fileTitle(title),
 			prop: 'imageinfo',
 			iiprop: 'url|size|mime|timestamp|user',
 			iiurlwidth: 200,
@@ -40,14 +39,11 @@ export const getFile: Tool<typeof inputSchema> = {
 		// oxlint-disable-next-line typescript/no-unsafe-type-assertion -- mwn API response shape; trusted at this boundary
 		const page = response.query?.pages?.[0] as ApiPage | undefined;
 
-		if (!page || page.missing) {
+		// A file served from a shared repository such as Commons has no page on
+		// this wiki, so the wiki calls it missing while still describing the file.
+		const info: ImageInfo | undefined = page?.imageinfo?.[0];
+		if (page === undefined || info === undefined) {
 			return ctx.format.notFound(`File "${title}" not found`);
-		}
-
-		const info: ImageInfo | undefined = page.imageinfo?.[0];
-
-		if (!info) {
-			return ctx.format.notFound(`No file info available for "${title}"`);
 		}
 
 		return ctx.format.ok({

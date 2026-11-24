@@ -19,43 +19,32 @@ import {
 	localhostHostValidation,
 	originValidation,
 } from '@modelcontextprotocol/express';
-import { evaluateBearerGuard } from './bearerGuard.ts';
-import { bearerPassthroughEnabled, hasStaticCredentials } from '../runtime/authShape.ts';
+import { checkHttpDeployment } from './httpDeployment.ts';
 import { LOCALHOST_HOSTS, resolveHttpConfig } from './httpConfig.ts';
 import { logger } from '../runtime/logger.ts';
-import {
-	getMetricsHandler,
-	initMetrics,
-	isMetricsEnabled,
-	setInFlightProvider,
-	setSubscriptionStreamsProvider,
-	setProxyStoreStatsProvider,
-} from '../runtime/metrics.ts';
+import { readMetrics, type Metrics } from '../runtime/metrics.ts';
 import { createInFlightCounter, type InFlightCounter } from './inFlight.ts';
-import { createMcpRouteHandler, resolveRequestProto, type ProxyConfigGetter } from './mcpRoute.ts';
+import { createMcpRouteHandler, resolveRequestProto } from './mcpRoute.ts';
 import { createRateLimiter, type RateLimiter } from './rateLimit.ts';
 import { PAYLOAD_TOO_LARGE_ERROR_CODE } from './errorCodes.ts';
+import { sendJsonRpcError } from './jsonRpcError.ts';
 import { mountReadyEndpoint } from './ready.ts';
 import { loadConfigFromFile } from '../config/loadConfig.ts';
 import type { WikiRegistry } from '../wikis/wikiRegistry.ts';
 import { fetchMetadata, type UpstreamAsMetadata } from '../auth/metadata.ts';
 import { buildProtectedResource } from '../auth/protectedResource.ts';
-import { resolveProxyConfig, type ProxyConfig } from '../auth/authorizationServer/proxyConfig.ts';
-import type { ProxyStore } from '../auth/authorizationServer/proxyStore.ts';
-import { createProxyStore } from '../auth/authorizationServer/proxyStorePersistence.ts';
+import { resolveProxyConfig } from '../auth/authorizationServer/proxyConfig.ts';
+import {
+	AUTHORIZATION_SERVER_PATHS,
+	startHostedProxy,
+} from '../auth/authorizationServer/hostedProxy.ts';
 import { mountAuthorizationServer } from '../auth/authorizationServer/router.ts';
-import { buildRedirectPolicy } from '../auth/authorizationServer/redirectPolicy.ts';
-import { buildCimdHostPredicate, CimdResolver } from '../auth/authorizationServer/cimd.ts';
-import { fetchCimdDocument } from './cimdFetch.ts';
 import { createAppState, type AppState } from '../wikis/state.ts';
 import { createServer, type ChangePublisher, type CreateServerOptions } from '../server.ts';
 import { emitStartupBanner } from '../runtime/banner.ts';
-import { createToolContext } from '../runtime/createContext.ts';
+import { createSharedContext } from '../runtime/createContext.ts';
 import { registerShutdownHandlers, resolveShutdownGrace } from '../runtime/shutdown.ts';
-
-// The exported surface here (BuildAppDeps, and the protected-resource handler's
-// deps) names this type, so a caller has to be able to name it too.
-export type { ProxyConfigGetter };
+import { readAuthPolicy, usesOAuthSignIn, type AuthPolicy } from '../runtime/authShape.ts';
 
 export function resolveMcpHostValidation(
 	host: string,
@@ -180,10 +169,9 @@ export function handleListenError(
 
 export function createOAuthProtectedResourceHandler(deps: {
 	wikiRegistry: WikiRegistry;
-	// Required: this document exists only while the hosted proxy does, so a caller
-	// that omitted it would silently disable the endpoint rather than select a
-	// fallback. Pass `() => null` to mean "no proxy".
-	getProxyConfig: ProxyConfigGetter;
+	// The hosted proxy's issuer; null without the proxy, which leaves this
+	// document nothing to name.
+	authorizationServer: string | null;
 }): RequestHandler {
 	return async (req, res, next) => {
 		try {
@@ -192,15 +180,13 @@ export function createOAuthProtectedResourceHandler(deps: {
 			// steered clients into minting tokens this server must not accept. Answered
 			// before the metadata fetches below, so an unauthenticated request no
 			// longer triggers one outbound fetch per OAuth wiki.
-			const proxyConfig = deps.getProxyConfig();
-			if (!proxyConfig) {
+			const { authorizationServer } = deps;
+			if (authorizationServer === null) {
 				res.status(404).end();
 				return;
 			}
 			const wikis = deps.wikiRegistry.getAll();
-			const oauthWikis = Object.entries(wikis).filter(
-				([, w]) => typeof w.oauth2ClientId === 'string' && w.oauth2ClientId.trim() !== '',
-			);
+			const oauthWikis = Object.entries(wikis).filter(([, w]) => usesOAuthSignIn(w));
 			if (oauthWikis.length === 0) {
 				res.status(404).end();
 				return;
@@ -229,7 +215,7 @@ export function createOAuthProtectedResourceHandler(deps: {
 				metadatas,
 				requestHost: req.headers.host ?? undefined,
 				requestProto,
-				authorizationServers: [proxyConfig.issuer],
+				authorizationServers: [authorizationServer],
 			});
 			if (!doc) {
 				res.status(404).end();
@@ -257,15 +243,9 @@ function isMcpEndpoint(req: Request): boolean {
 // endpoint speaks JSON-RPC. A body-parser failure happens before routing, so an
 // unrouted path reaches this handler too and gets neither dialect: telling an
 // arbitrary path it is an OAuth endpoint would advertise the whole server as one.
-const AUTHORIZATION_SERVER_PATHS: ReadonlySet<string> = new Set([
-	'/mcp/register',
-	'/mcp/authorize',
-	'/mcp/consent',
-	'/mcp/oauth/callback',
-	'/mcp/token',
-	'/.well-known/oauth-authorization-server',
-	'/.well-known/oauth-authorization-server/mcp',
-]);
+const authorizationServerPaths: ReadonlySet<string> = new Set(
+	Object.values(AUTHORIZATION_SERVER_PATHS),
+);
 
 type ErrorDialect = 'jsonrpc' | 'oauth' | 'plain';
 
@@ -275,7 +255,7 @@ function dialectFor(req: Request): ErrorDialect {
 		return 'jsonrpc';
 	}
 	const withoutTrailingSlash = path.length > 1 ? path.replace(/\/+$/, '') : path;
-	return AUTHORIZATION_SERVER_PATHS.has(withoutTrailingSlash) ? 'oauth' : 'plain';
+	return authorizationServerPaths.has(withoutTrailingSlash) ? 'oauth' : 'plain';
 }
 
 // body-parser tags each of its failures with a `type` discriminator; anything
@@ -321,13 +301,8 @@ export function errorHandler(limit: string): ErrorRequestHandler {
 
 		switch (dialectFor(req)) {
 			case 'jsonrpc':
-				res.status(status).json({
-					jsonrpc: '2.0',
-					// The id is omitted rather than null: this revision's error shape
-					// admits only a string or a number, and every failure reaching here
-					// happened before a request id could be read.
-					error: { code: jsonRpcCodeFor(tooLarge, parseFailed), message },
-				});
+				// Every failure reaching here happened before a request id could be read.
+				sendJsonRpcError(res, status, { code: jsonRpcCodeFor(tooLarge, parseFailed), message });
 				return;
 			case 'oauth':
 				res.status(status).json({ error: 'invalid_request', error_description: message });
@@ -345,15 +320,15 @@ function jsonRpcCodeFor(tooLarge: boolean, parseFailed: boolean): number {
 	return parseFailed ? PARSE_ERROR : INTERNAL_ERROR;
 }
 
-export function mountMetricsEndpoint(app: express.Express): void {
-	if (!isMetricsEnabled()) {
+export function mountMetricsEndpoint(app: express.Express, metrics: Metrics): void {
+	const { exposition } = metrics;
+	if (exposition === undefined) {
 		return;
 	}
-	initMetrics();
-	const handler = getMetricsHandler();
-	if (handler) {
-		app.get('/metrics', handler);
-	}
+	app.get('/metrics', async (_req: Request, res: Response) => {
+		res.set('Content-Type', exposition.contentType);
+		res.status(200).send(await exposition.render());
+	});
 }
 
 // The HTTP server's boot — config load, the static-credentials guard, proxy-
@@ -369,20 +344,7 @@ export function mountMetricsEndpoint(app: express.Express): void {
 // app.listen, no process.exit guard, no encrypted-store hydration).
 export interface BuildAppDeps {
 	state: AppState;
-	getProxyConfig: ProxyConfigGetter;
-	proxyStore: ProxyStore;
-	// The register-time redirect predicate, built once from the resolved proxy
-	// config (built-ins + operator allowlist). Null when the proxy is disabled,
-	// in which case /mcp/register 404s alongside the other proxy endpoints.
-	proxyRedirectPolicy: ((uri: string) => boolean) | null;
-	// The CIMD client resolver, built once from the resolved proxy config. Null when
-	// the proxy is disabled. Resolves a URL client_id into a ClientRecord by fetching
-	// its metadata document (DCR clients keep using the store).
-	cimdResolver: CimdResolver | null;
-	// The default wiki KEY (bound into the consent cookie) and human-readable
-	// sitename (shown on the consent page). Match getProxyConfig's wiki.
-	defaultWikiKey: string;
-	defaultWikiSitename: string;
+	auth: AuthPolicy;
 	// Called once per serving unit — every HTTP request under createMcpHandler
 	// (modern or stateless legacy alike) gets a fresh instance. The options
 	// carry the change publisher buildApp wires to the handler's notify facade.
@@ -395,6 +357,7 @@ export interface BuildAppDeps {
 	maxRequestBody: string;
 	// Limits tools/call per caller; omitted when disabled (MCP_RATE_LIMIT=0).
 	rateLimiter?: RateLimiter;
+	metrics: Metrics;
 }
 
 export interface BuiltApp {
@@ -416,26 +379,21 @@ export interface BuiltApp {
 export function buildApp(deps: BuildAppDeps): BuiltApp {
 	const {
 		state,
-		getProxyConfig,
-		proxyStore: store,
-		proxyRedirectPolicy,
-		cimdResolver,
-		defaultWikiKey,
-		defaultWikiSitename,
+		auth,
 		createServerFn,
 		host,
 		allowedHosts,
 		allowedOrigins,
 		maxRequestBody,
 		rateLimiter,
+		metrics,
 	} = deps;
 
 	// A `private` wiki challenges anonymous callers with a 401 whose discovery
 	// document only resolves to an authorization server when the wiki has an
 	// `oauth2ClientId`. Warn the operator about a private wiki that lacks one.
 	for (const [key, cfg] of Object.entries(state.wikiRegistry.getAll())) {
-		const hasAs = typeof cfg.oauth2ClientId === 'string' && cfg.oauth2ClientId.trim() !== '';
-		if (cfg.private === true && !hasAs) {
+		if (cfg.private === true && !usesOAuthSignIn(cfg)) {
 			logger.warning(
 				`Wiki "${key}" is marked private but has no oauth2ClientId, so a client cannot be ` +
 					'pointed anywhere to sign in. Configure hosted OAuth sign-in (oauth2ClientId, ' +
@@ -509,12 +467,12 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 	});
 
 	const mcpRoute = createMcpRouteHandler(handler, {
+		auth,
 		wikiRegistry: state.wikiRegistry,
-		getProxyConfig,
-		proxyStore: store,
-		defaultWikiKey,
+		defaultWikiKey: state.defaultWikiKey,
 		onerror: (error) => logger.error(`MCP adapter error: ${error.message}`),
 		rateLimiter,
+		metrics,
 	});
 	// OPTIONS is routed explicitly: Express answers it from its own default
 	// handler otherwise, which sits outside the route stack and so outside the
@@ -535,26 +493,26 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 		'/.well-known/oauth-protected-resource',
 		createOAuthProtectedResourceHandler({
 			wikiRegistry: state.wikiRegistry,
-			getProxyConfig,
+			authorizationServer: auth.hostedProxy?.config.issuer ?? null,
 		}),
 	);
 
-	mountAuthorizationServer(app, {
-		getProxyConfig,
-		store,
-		proxyRedirectPolicy,
-		cimdResolver,
-		defaultWikiKey,
-		defaultWikiSitename,
-	});
+	const { hostedProxy } = auth;
+	if (hostedProxy) {
+		mountAuthorizationServer(app, hostedProxy);
+		metrics.setProxyStoreStatsProvider(() => hostedProxy.store.stats());
+	}
 
-	mountReadyEndpoint(app, { activeWiki: state.activeWiki, mwnProvider: state.mwnProvider });
-	mountMetricsEndpoint(app);
-	setInFlightProvider(inFlight.count);
+	mountReadyEndpoint(app, {
+		defaultWikiKey: state.defaultWikiKey,
+		mwnProvider: state.mwnProvider,
+		metrics,
+	});
+	mountMetricsEndpoint(app, metrics);
+	metrics.setInFlightProvider(inFlight.count);
 	// Every open subscriptions/listen stream registers one bus listener, so the
 	// listener count IS the open-stream count (nothing else subscribes).
-	setSubscriptionStreamsProvider(() => bus.listenerCount);
-	setProxyStoreStatsProvider(() => store.stats());
+	metrics.setSubscriptionStreamsProvider(() => bus.listenerCount);
 
 	// Last, so that a throw from any route above reaches it as well as a
 	// body-parser failure from before routing.
@@ -570,151 +528,54 @@ export function buildApp(deps: BuildAppDeps): BuiltApp {
 // helper, as the tests do) has no side effects — no config read, no process.exit,
 // no bound socket.
 export function startHttpServer(): void {
-	// Wiki config must load before HTTP config so evaluateBearerGuard below can
-	// inspect wikiRegistry.getAll() to decide whether static credentials are
-	// configured. resolveHttpConfig() reads only env vars and is order-independent
-	// — placed after for visual grouping with the HTTP setup.
+	// Wiki config must load before HTTP config so checkHttpDeployment below can
+	// inspect wikiRegistry.getAll(). resolveHttpConfig() reads only env vars and
+	// is order-independent — placed after for visual grouping with the HTTP setup.
 	const config = loadConfigFromFile();
 	const state = createAppState(config);
 
-	// Shared hosted-OAuth-proxy infrastructure, reused by the authorization-server
-	// endpoints (AS metadata, register, authorize, callback, token). The proxy is
-	// active only when the default wiki has an oauth2ClientId, the transport is
-	// http, and the JWT signing key + public URL are set (see resolveProxyConfig).
-	//
-	// getDefaultProxyConfig is memoized: resolveProxyConfig reads only the default
-	// wiki and process.env, both fixed for the process lifetime, so resolving once
-	// is sufficient. A ProxyConfigError (e.g. signing key too short) is left to
-	// propagate as a fatal misconfiguration; the eager call at startup (below)
-	// forces it during boot, consistent with how the server treats other fatal
-	// config errors (e.g. the static-credentials guard).
-	let cachedProxyConfig: ProxyConfig | null | undefined;
-	function getDefaultProxyConfig(): ProxyConfig | null {
-		if (cachedProxyConfig === undefined) {
-			const defaultKey = state.activeWiki.getDefaultKey();
-			const wiki = state.wikiRegistry.get(defaultKey);
-			cachedProxyConfig = wiki ? resolveProxyConfig(defaultKey, wiki, process.env) : null;
-		}
-		return cachedProxyConfig;
-	}
+	// The hosted OAuth proxy signs users in to the default wiki. A ProxyConfigError
+	// (e.g. signing key too short) fails the boot, like the other fatal config errors.
+	const { defaultWikiKey } = state;
+	const defaultWiki = state.wikiRegistry.get(defaultWikiKey);
+	const proxyConfig = defaultWiki
+		? resolveProxyConfig(defaultWikiKey, defaultWiki, process.env)
+		: null;
 
-	// The consent cookie binds a deployment-stable wiki id; we use the default
-	// wiki KEY (the same key getDefaultProxyConfig resolves) for that binding, so
-	// signing (buildConsentCookie) and verification (verifyConsent) agree on it.
-	// The sitename is the human-readable display name shown on the consent page.
-	const defaultWikiKey = state.activeWiki.getDefaultKey();
-	const defaultWikiSitename = state.wikiRegistry.get(defaultWikiKey)?.sitename ?? defaultWikiKey;
+	const metrics = readMetrics(process.env, 'http');
+	const hostedProxy =
+		proxyConfig && defaultWiki
+			? startHostedProxy(proxyConfig, defaultWiki.sitename, metrics, (err) =>
+					logger.error(`Proxy store persistence write failed: ${err.message}`),
+				)
+			: null;
+	const auth = readAuthPolicy(process.env, 'http', hostedProxy, null);
 
 	const { host, port, allowedHosts, allowedOrigins, maxRequestBody, rateLimit, warnings } =
 		resolveHttpConfig();
-	const guard = evaluateBearerGuard(state.wikiRegistry.getAll(), process.env);
-	if (guard.kind === 'block') {
-		logger.error(
-			'HTTP transport refuses to start because static credentials are configured for wiki(s): ' +
-				guard.wikis.join(', ') +
-				'.\n' +
-				'A request without an Authorization header would silently act as the configured identity, ' +
-				'so writes could not be attributed to the caller that made them.\n' +
-				'Remove `token`, `username`, and `password` from these wikis in config.json, ' +
-				'or set MCP_ALLOW_STATIC_FALLBACK=true to acknowledge the shared-identity deployment shape.',
-		);
+	const deployment = checkHttpDeployment({
+		wikis: state.wikiRegistry.getAll(),
+		defaultWikiKey,
+		auth,
+	});
+	if (deployment.refusal !== undefined) {
+		logger.error(deployment.refusal);
 		process.exit(1);
 	}
-	if (guard.kind === 'override') {
-		logger.warning(
-			'MCP_ALLOW_STATIC_FALLBACK=true is set. Wiki(s) with static credentials: ' +
-				guard.wikis.join(', ') +
-				'. ' +
-				'Requests without an Authorization header will act as the configured identity. ' +
-				'This deployment cannot attribute writes to individual callers.',
-		);
-	}
-	for (const warning of warnings) {
+	for (const warning of [...deployment.warnings, ...warnings]) {
 		logger.warning(warning);
 	}
-	// Resolve the proxy config eagerly so a ProxyConfigError fails the boot rather
-	// than the first request. Memoized, so the route handlers reuse the cached result.
-	const eagerProxyConfig = getDefaultProxyConfig();
-	const proxyEnabled = eagerProxyConfig !== null;
-	if (bearerPassthroughEnabled()) {
-		logger.warning(
-			proxyEnabled
-				? 'MCP_ALLOW_BEARER_PASSTHROUGH=true is set but has no effect: hosted OAuth sign-in ' +
-						'is configured, so a bearer is read as a token this server issued and a ' +
-						'caller-supplied one is refused. Unset the variable.'
-				: 'MCP_ALLOW_BEARER_PASSTHROUGH=true is set. A caller-supplied Authorization header ' +
-						'is forwarded to MediaWiki as that caller. This is deprecated: MCP servers must ' +
-						'not accept tokens that were not issued for them. Prefer the hosted OAuth ' +
-						'sign-in, which issues this server its own tokens.',
-		);
-	}
-	// A deployment can now be configured so that nothing it serves can authenticate:
-	// wikis that require OAuth, no hosted sign-in to mint a token, and no opted-in
-	// forwarding to carry one. Nothing a client sends can fix that, so say it here
-	// rather than leaving every call to fail upstream.
-	if (!proxyEnabled && !bearerPassthroughEnabled()) {
-		const staticAllowed = process.env.MCP_ALLOW_STATIC_FALLBACK === 'true';
-		const stranded = Object.entries(state.wikiRegistry.getAll())
-			.filter(([key, cfg]) => {
-				const usesOAuth =
-					typeof cfg.oauth2ClientId === 'string' && cfg.oauth2ClientId.trim() !== '';
-				const usableStatic = hasStaticCredentials(cfg) && staticAllowed;
-				// A `private` DEFAULT wiki cannot be rescued by static credentials: the
-				// route challenges a tokenless request before any credential is
-				// resolved, so every request to such a deployment is answered 401.
-				if (cfg.private === true && key === defaultWikiKey) {
-					return true;
-				}
-				return (usesOAuth || cfg.private === true) && !usableStatic;
-			})
-			.map(([key]) => key);
-		if (stranded.length > 0) {
-			logger.warning(
-				'No way to authenticate to wiki(s): ' +
-					stranded.join(', ') +
-					'. They require a signed-in user, but the hosted OAuth sign-in is not configured ' +
-					'and forwarding a caller-supplied token is off. Set MCP_PUBLIC_URL and ' +
-					'MCP_OAUTH_JWT_SIGNING_KEY to enable hosted sign-in (see docs/deployment.md).',
-			);
-		}
-	}
-	// Single process-wide proxy store, shared by the proxy handlers
-	// (register/authorize/callback/token). It persists its durable state (client
-	// registrations + upstream tokens) to an encrypted local file when the proxy is
-	// enabled; otherwise it is a plain in-memory store. createProxyStore hydrates
-	// synchronously here, before the server binds, so a restart resolves existing
-	// tokens with no browser round-trip.
-	const proxyStore: ProxyStore = createProxyStore(eagerProxyConfig, {
-		onError: (err) => logger.error(`Proxy store persistence write failed: ${err.message}`),
-	});
-	// Built once: the register-time redirect predicate (built-ins + operator
-	// entries from MCP_OAUTH_ALLOWED_REDIRECTS). /authorize keeps matching the
-	// registered URIs verbatim and never re-applies this policy.
-	const proxyRedirectPolicy = eagerProxyConfig
-		? buildRedirectPolicy(eagerProxyConfig.redirectAllowlist)
-		: null;
-	// Built once from the resolved proxy config: resolves a URL client_id into a
-	// ClientRecord by fetching its CIMD metadata document over the SSRF-guarded
-	// fetcher. Null when the proxy is disabled.
-	const cimdResolver = eagerProxyConfig
-		? new CimdResolver(buildCimdHostPredicate(eagerProxyConfig.cimdAllowedHosts), fetchCimdDocument)
-		: null;
 	emitStartupBanner(
 		{ transport: 'http', http: { host, port, allowedHosts, allowedOrigins, maxRequestBody } },
 		{
 			wikiRegistry: state.wikiRegistry,
-			activeWiki: state.activeWiki,
+			defaultWikiKey: state.defaultWikiKey,
 			uploadDirs: state.uploadDirs,
-			proxyEnabled,
+			auth,
 		},
 	);
 
-	const ctx = createToolContext({
-		logger,
-		state,
-		transport: 'http',
-		getProxyConfig: getDefaultProxyConfig,
-	});
+	const ctx = createSharedContext({ logger, state, auth, metrics });
 
 	if (rateLimit) {
 		logger.info(
@@ -730,18 +591,14 @@ export function startHttpServer(): void {
 	}
 	const { app, inFlight, mcpHandler } = buildApp({
 		state,
-		getProxyConfig: getDefaultProxyConfig,
-		proxyStore,
-		proxyRedirectPolicy,
-		cimdResolver,
-		defaultWikiKey,
-		defaultWikiSitename,
+		auth,
 		createServerFn: (opts) => createServer(ctx, opts),
 		host,
 		allowedHosts,
 		allowedOrigins,
 		maxRequestBody,
 		rateLimiter: rateLimit ? createRateLimiter(rateLimit) : undefined,
+		metrics,
 	});
 
 	const httpServer = app.listen(port, host, () => {

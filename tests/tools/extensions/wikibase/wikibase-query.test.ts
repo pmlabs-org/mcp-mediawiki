@@ -1,18 +1,18 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-vi.mock('../../../../src/transport/httpFetch.ts', async () => {
-	const actual = await vi.importActual<typeof import('../../../../src/transport/httpFetch.ts')>(
-		'../../../../src/transport/httpFetch.ts',
+vi.mock('../../../../src/outbound/httpFetch.ts', async () => {
+	const actual = await vi.importActual<typeof import('../../../../src/outbound/httpFetch.ts')>(
+		'../../../../src/outbound/httpFetch.ts',
 	);
 	return { ...actual, postForm: vi.fn() };
 });
 
-import { postForm, HttpStatusError } from '../../../../src/transport/httpFetch.ts';
-import { fakeContext } from '../../../helpers/fakeContext.ts';
-import type { SiteInfo } from '../../../../src/wikis/siteInfoCache.ts';
+import { postForm, HttpStatusError } from '../../../../src/outbound/httpFetch.ts';
+import { fakeContext, probeReporting } from '../../../helpers/fakeContext.ts';
 import { toolArgs } from '../../../helpers/toolArgs.ts';
 import { wikibaseQuery } from '../../../../src/tools/extensions/wikibase/wikibase-query.ts';
 import { assertStructuredData, assertStructuredError } from '../../../helpers/structuredResult.ts';
+import { dispatch } from '../../../../src/runtime/dispatcher.ts';
 
 const ENDPOINT = 'https://query.example.org/sparql';
 const CATS = 'SELECT ?item WHERE { ?item wdt:P31 wd:Q146 } LIMIT 3';
@@ -20,22 +20,8 @@ const CATS = 'SELECT ?item WHERE { ?item wdt:P31 wd:Q146 } LIMIT 3';
 // The endpoint comes from the wiki's own siteinfo. A wiki publishing none never
 // reaches the handler: the pack's wikiGate refuses it centrally, which
 // tests/runtime/wikiCapability.test.ts covers.
-function contextWithSiteInfo(siteInfo: SiteInfo) {
-	const ctx = fakeContext();
-	ctx.siteInfoCache.set('test-wiki', siteInfo);
-	return ctx;
-}
-
 function contextWithEndpoint() {
-	return contextWithSiteInfo({
-		server: 'https://test.wiki',
-		articlepath: '/wiki',
-		sparqlEndpoint: ENDPOINT,
-	});
-}
-
-function contextWithoutEndpoint() {
-	return contextWithSiteInfo({ server: 'https://test.wiki', articlepath: '/wiki' });
+	return fakeContext({ wikiProbe: probeReporting({ sparqlEndpoint: ENDPOINT }) });
 }
 
 function selectResults(bindings: unknown[], vars: string[] = ['item']): string {
@@ -69,18 +55,6 @@ describe('wikibase-query', () => {
 
 		expect(vi.mocked(postForm).mock.calls[0][0]).toBe(ENDPOINT);
 		expect(vi.mocked(postForm).mock.calls[0][1]).toEqual({ query: CATS });
-	});
-
-	// Defensive: the pack's wikiGate refuses such a wiki before dispatch.
-	it('refuses without querying when the wiki advertises no query service', async () => {
-		const ctx = contextWithoutEndpoint();
-
-		const result = await wikibaseQuery.handle(toolArgs(wikibaseQuery, { query: CATS }), ctx);
-
-		expect(assertStructuredError(result, 'invalid_input').message).toBe(
-			'Wiki "test-wiki" advertises no query service, so SPARQL cannot be run against it. Use list-wikis to see which wikis have one.',
-		);
-		expect(vi.mocked(postForm)).not.toHaveBeenCalled();
 	});
 
 	it('returns the columns and rows of a SELECT', async () => {
@@ -164,13 +138,13 @@ describe('wikibase-query', () => {
 		);
 		const ctx = contextWithEndpoint();
 
-		const result = await wikibaseQuery.handle(
-			toolArgs(wikibaseQuery, { query: 'SELECT ?x WHERE {' }),
+		const result = await dispatch(
+			wikibaseQuery,
 			ctx,
-		);
+		)(toolArgs(wikibaseQuery, { query: 'SELECT ?x WHERE {' }));
 
-		expect(assertStructuredError(result, 'invalid_input').message).toContain(
-			'MalformedQueryException',
+		expect(assertStructuredError(result, 'invalid_input').message).toMatch(
+			/^Failed to run SPARQL query: MalformedQueryException/,
 		);
 	});
 

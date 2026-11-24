@@ -1,5 +1,6 @@
 import { parseRedirectAllowlist, type RedirectAllowlist } from './redirectPolicy.ts';
 import { parseCimdAllowedHosts } from './cimd.ts';
+import { errorMessage } from '../../errors/errorMessage.ts';
 
 export class ProxyConfigError extends Error {
 	public constructor(message: string) {
@@ -9,6 +10,8 @@ export class ProxyConfigError extends Error {
 }
 
 export interface ProxyConfig {
+	// The wiki the proxy signs users in to, and the only one its tokens are sent to.
+	wikiKey: string;
 	issuer: string;
 	authorizeBase: string;
 	tokenExchangeBase: string;
@@ -47,7 +50,7 @@ function stripTrailingSlash(u: string): string {
 }
 
 export function resolveProxyConfig(
-	_wikiKey: string,
+	wikiKey: string,
 	wiki: ProxyWikiInput,
 	env: NodeJS.ProcessEnv,
 ): ProxyConfig | null {
@@ -55,9 +58,8 @@ export function resolveProxyConfig(
 	const clientSecret = wiki.oauth2ClientSecret?.trim() || undefined;
 	const publicUrl = env.MCP_PUBLIC_URL?.trim();
 	const signingKey = env.MCP_OAUTH_JWT_SIGNING_KEY?.trim();
-	const transport = env.MCP_TRANSPORT ?? 'stdio';
 
-	if (!clientId || !publicUrl || !signingKey || transport !== 'http') {
+	if (!clientId || !publicUrl || !signingKey) {
 		return null;
 	}
 
@@ -115,21 +117,18 @@ export function resolveProxyConfig(
 	try {
 		redirectAllowlist = parseRedirectAllowlist(env.MCP_OAUTH_ALLOWED_REDIRECTS);
 	} catch (e) {
-		throw new ProxyConfigError(
-			`MCP_OAUTH_ALLOWED_REDIRECTS: ${e instanceof Error ? e.message : String(e)}`,
-		);
+		throw new ProxyConfigError(`MCP_OAUTH_ALLOWED_REDIRECTS: ${errorMessage(e)}`);
 	}
 
 	let cimdAllowedHosts: string[];
 	try {
 		cimdAllowedHosts = parseCimdAllowedHosts(env.MCP_OAUTH_CIMD_ALLOWED_HOSTS);
 	} catch (e) {
-		throw new ProxyConfigError(
-			`MCP_OAUTH_CIMD_ALLOWED_HOSTS: ${e instanceof Error ? e.message : String(e)}`,
-		);
+		throw new ProxyConfigError(`MCP_OAUTH_CIMD_ALLOWED_HOSTS: ${errorMessage(e)}`);
 	}
 
 	return {
+		wikiKey,
 		issuer,
 		authorizeBase: stripTrailingSlash(wiki.publicServer?.trim() || wiki.server),
 		tokenExchangeBase: stripTrailingSlash(wiki.server),

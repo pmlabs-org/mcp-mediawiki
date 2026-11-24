@@ -1,12 +1,11 @@
 import { type StderrWriteSpy } from '../helpers/stderrSpy.ts';
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-const { mockAcquireToken } = vi.hoisted(() => ({ mockAcquireToken: vi.fn() }));
-vi.mock('../../src/auth/acquireToken.ts', () => ({ acquireToken: mockAcquireToken }));
 import { z } from 'zod';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import type { Tool } from '../../src/runtime/tool.ts';
 import { fakeContext, ctxForWiki } from '../helpers/fakeContext.ts';
+import { StdioSignIn } from '../../src/auth/stdioSignIn.ts';
 import { fakeLogger } from '../helpers/fakeLogger.ts';
 import { createMockMwnError } from '../helpers/mock-mwn-error.ts';
 import { CredentialResolutionError } from '../../src/errors/credentialResolutionError.ts';
@@ -16,6 +15,7 @@ import { WikiTimeoutError } from '../../src/errors/wikiTimeoutError.ts';
 import { getPage } from '../../src/tools/get-page.ts';
 import { ContentFormat } from '../../src/results/contentFormat.ts';
 import { assertStructuredError } from '../helpers/structuredResult.ts';
+import { sectionNotFound } from '../../src/errors/tailoredErrors.ts';
 
 const noopTool = (handle: Tool<{ x: z.ZodString }>['handle']): Tool<{ x: z.ZodString }> => ({
 	name: 'get-page',
@@ -62,18 +62,31 @@ describe('dispatcher', () => {
 		expect(envelope.code).toBe('permissiondenied');
 	});
 
-	it('applies special case for nosuchsection', async () => {
+	it('words an error the way its tool declares for that code', async () => {
 		const ctx = fakeContext();
-		const tool = noopTool(async () => {
-			throw Object.assign(new Error('section 7 does not exist'), {
-				code: 'nosuchsection',
-			});
-		});
-		(tool as { name: string }).name = 'update-page';
+		const tool = {
+			...noopTool(async () => {
+				throw Object.assign(new Error('section 7 does not exist'), { code: 'nosuchsection' });
+			}),
+			tailoredErrors: { nosuchsection: sectionNotFound },
+		};
 		const result = await dispatch(tool, ctx)({ x: 'y' });
-		const envelope = JSON.parse((result.content[0] as { text: string }).text);
+		const envelope = assertStructuredError(result, 'not_found', 'nosuchsection');
 		expect(envelope.message).toBe('Section 7 does not exist');
-		expect(envelope.code).toBe('nosuchsection');
+	});
+
+	it('does not take a built-in object property for a declared wording', async () => {
+		const ctx = fakeContext();
+		const tool = {
+			...noopTool(async () => {
+				throw Object.assign(new Error('boom'), { code: 'constructor' });
+			}),
+			failureVerb: 'get page',
+			tailoredErrors: {},
+		};
+		const result = await dispatch(tool, ctx)({ x: 'y' });
+		const envelope = assertStructuredError(result, 'upstream_failure');
+		expect(envelope.message).toBe('Failed to get page: boom');
 	});
 
 	it('logs the failure with tool name and category', async () => {
@@ -103,11 +116,16 @@ describe('dispatcher', () => {
 
 	it('starts the budget after an interactive sign-in, not before it', async () => {
 		let duringSignIn: unknown = 'unset';
-		mockAcquireToken.mockReset().mockImplementation(async () => {
-			duringSignIn = getRequestDeadline();
-			return 'token';
-		});
-		const ctx = ctxForWiki(
+		let signIns = 0;
+		// Signs in at once, noting the time budget in force while it does.
+		class InstantSignIn extends StdioSignIn {
+			public override async acquire(): Promise<string> {
+				signIns++;
+				duringSignIn = getRequestDeadline();
+				return 'token';
+			}
+		}
+		const oauthWiki = ctxForWiki(
 			{
 				sitename: 'Test',
 				server: 'https://test.wiki',
@@ -117,6 +135,7 @@ describe('dispatcher', () => {
 			},
 			'stdio',
 		);
+		const ctx = { ...oauthWiki, auth: { ...oauthWiki.auth, stdioSignIn: new InstantSignIn() } };
 		let seen: { timeoutMs: number } | undefined;
 		const tool = noopTool(async () => {
 			seen = getRequestDeadline();
@@ -126,7 +145,7 @@ describe('dispatcher', () => {
 		await dispatch(tool, ctx)({ x: 'y' });
 
 		// A browser sign-in is minutes of human reaction time.
-		expect(mockAcquireToken).toHaveBeenCalledOnce();
+		expect(signIns).toBe(1);
 		expect(duringSignIn).toBeUndefined();
 		expect(seen?.timeoutMs).toBe(WIKI_CALL_TIMEOUT_MS);
 	});
@@ -254,6 +273,14 @@ describe('dispatcher emits tool_call telemetry', () => {
 		expect(line!.tool).toBe('get-page');
 		expect(line!.outcome).toBe('success');
 		expect(line!.level).toBe('info');
+	});
+
+	it('attributes the call to the wiki it names', async () => {
+		const ctx = fakeContext();
+		const tool = noopTool(async () => ctx.format.ok({ ok: true }));
+		await dispatch(tool, ctx)({ wiki: 'fr.wikipedia.org' } as never);
+
+		expect(captureToolCallLine(stderrSpy)?.wiki).toBe('fr.wikipedia.org');
 	});
 
 	it('emits an error tool_call event when the handler throws', async () => {

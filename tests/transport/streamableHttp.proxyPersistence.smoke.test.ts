@@ -3,7 +3,6 @@
 // through the REAL buildApp routes + a real encrypted on-disk store.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
-import { McpServer } from '@modelcontextprotocol/server';
 import * as os from 'node:os';
 import * as path from 'node:path';
 
@@ -17,11 +16,15 @@ import {
 } from '../../src/auth/authorizationServer/proxyStore.ts';
 import { PersistentProxyStore } from '../../src/auth/authorizationServer/proxyStorePersistence.ts';
 import { deriveKey } from '../../src/auth/authorizationServer/proxyStoreCrypto.ts';
-import { buildRedirectPolicy } from '../../src/auth/authorizationServer/redirectPolicy.ts';
 import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
 import { randomVerifier, s256 } from '../../src/auth/pkce.ts';
 import { startFakeAs, type FakeAsHandle } from '../helpers/fakeAuthorizationServer.ts';
 import { runHostedFlow } from '../helpers/fakeMcpClient.ts';
+import { readAuthPolicy } from '../../src/runtime/authShape.ts';
+import { fakeAppDeps } from '../helpers/fakeAppDeps.ts';
+import { metricsOff } from '../helpers/metrics.ts';
 
 const ISSUER = 'https://mcp.example/mcp';
 const SIGNING_KEY = 'k'.repeat(32);
@@ -46,36 +49,24 @@ function appState(fakeAsUrl: string) {
 }
 
 function proxyConfig(fakeAsUrl: string): ProxyConfig {
-	return {
+	return fakeProxyConfig({
 		issuer: ISSUER,
 		authorizeBase: fakeAsUrl,
 		tokenExchangeBase: fakeAsUrl,
-		scriptpath: '/w',
 		callbackUrl: `${ISSUER}/oauth/callback`,
 		upstreamClientId: 'UPSTREAM-CLIENT',
+		upstreamClientSecret: undefined,
 		signingKey: SIGNING_KEY,
 		consentTtlMs: 60_000,
 		tokenTtlMs: 55 * 60 * 1000,
-		redirectAllowlist: [],
-		cimdAllowedHosts: [],
-	};
+	});
 }
 
 function makeDeps(fakeAsUrl: string, store: ProxyStore, pc: ProxyConfig): BuildAppDeps {
-	return {
+	return fakeAppDeps({
 		state: appState(fakeAsUrl),
-		getProxyConfig: () => pc,
-		proxyStore: store,
-		proxyRedirectPolicy: buildRedirectPolicy(pc.redirectAllowlist),
-		cimdResolver: null,
-		defaultWikiKey: 'test',
-		defaultWikiSitename: 'Test Wiki',
-		createServerFn: () => new McpServer({ name: 'smoke', version: '0.0.0' }, { capabilities: {} }),
-		host: '127.0.0.1',
-		allowedHosts: undefined,
-		allowedOrigins: [],
-		maxRequestBody: '1mb',
-	};
+		auth: readAuthPolicy(process.env, 'http', fakeHostedProxy(pc, store), null),
+	});
 }
 
 describe('#451 smoke: proxy sign-in survives a restart (real routes + encrypted file)', () => {
@@ -95,7 +86,7 @@ describe('#451 smoke: proxy sign-in survives a restart (real routes + encrypted 
 		const pc = proxyConfig(fakeAs.url);
 
 		// --- run 1: full sign-in through the real proxy routes ---
-		const store1 = new PersistentProxyStore(new InMemoryProxyStore(), file, KEY);
+		const store1 = new PersistentProxyStore(new InMemoryProxyStore(), file, KEY, metricsOff());
 		store1.hydrate();
 		const { app: app1 } = buildApp(makeDeps(fakeAs.url, store1, pc));
 		const result = await runHostedFlow({ app: app1 });
@@ -113,7 +104,7 @@ describe('#451 smoke: proxy sign-in survives a restart (real routes + encrypted 
 		expect(rawStr).not.toContain(result.clientId);
 
 		// --- simulate a restart: brand-new store hydrated from the same file ---
-		const store2 = new PersistentProxyStore(new InMemoryProxyStore(), file, KEY);
+		const store2 = new PersistentProxyStore(new InMemoryProxyStore(), file, KEY, metricsOff());
 		store2.hydrate();
 		const { app: app2 } = buildApp(makeDeps(fakeAs.url, store2, pc));
 

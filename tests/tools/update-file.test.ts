@@ -1,30 +1,10 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import type { Mock } from 'vitest';
 import { createMockMwn } from '../helpers/mock-mwn.ts';
-import { fakeContext } from '../helpers/fakeContext.ts';
+import { fakeContext, contextOn, uploadDirsResolving } from '../helpers/fakeContext.ts';
 
-vi.mock('../../src/transport/uploadGuard.ts', async () => {
-	const actual = await vi.importActual<typeof import('../../src/transport/uploadGuard.ts')>(
-		'../../src/transport/uploadGuard.ts',
-	);
-	return {
-		...actual,
-		assertAllowedPath: vi.fn(),
-	};
-});
-
-vi.mock('../../src/transport/fileExistence.ts', async () => {
-	const actual = await vi.importActual<typeof import('../../src/transport/fileExistence.ts')>(
-		'../../src/transport/fileExistence.ts',
-	);
-	return {
-		...actual,
-		assertFileExists: vi.fn(),
-	};
-});
-
-import { assertAllowedPath, UploadValidationError } from '../../src/transport/uploadGuard.ts';
-import { assertFileExists, FileNotFoundError } from '../../src/transport/fileExistence.ts';
+import { UploadDirsImpl, type UploadDirs } from '../../src/wikis/uploadDirs.ts';
+import { FILE_EXISTS, FILE_MISSING } from '../helpers/uploadingWiki.ts';
 import { updateFile } from '../../src/tools/update-file.ts';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import { assertStructuredError, assertStructuredSuccess } from '../helpers/structuredResult.ts';
@@ -36,14 +16,14 @@ function ctxWith(
 	opts: {
 		mwn?: ReturnType<typeof createMockMwn>;
 		submitUpload?: Mock;
+		uploadDirs?: UploadDirs;
 	} = {},
 ) {
-	const mwn = opts.mwn ?? createMockMwn();
+	const mwn = opts.mwn ?? createMockMwn({ request: vi.fn().mockResolvedValue(FILE_EXISTS) });
 	const submitUpload = opts.submitUpload ?? vi.fn();
-	const ctx = fakeContext({
-		mwn: async () => mwn as never,
+	const ctx = contextOn(mwn, {
 		edit: { ...baseEdit, submitUpload },
-		uploadDirs: { list: () => ['/home/user/uploads'] },
+		uploadDirs: opts.uploadDirs ?? uploadDirsResolving('/var/lib/uploads/cat.jpg'),
 	});
 	return { mwn, submitUpload, ctx };
 }
@@ -53,11 +33,8 @@ describe('update-file', () => {
 		vi.clearAllMocks();
 	});
 
-	it('returns invalid_input for UploadValidationError, skips pre-flight and upload', async () => {
-		vi.mocked(assertAllowedPath).mockRejectedValue(
-			new UploadValidationError('"/etc/passwd" is not allowed'),
-		);
-		const { submitUpload, ctx } = ctxWith();
+	it('refuses a path the upload directories reject as invalid_input, skipping pre-flight and upload', async () => {
+		const { mwn, submitUpload, ctx } = ctxWith({ uploadDirs: new UploadDirsImpl([]) });
 
 		const result = await updateFile.handle(
 			{
@@ -68,14 +45,18 @@ describe('update-file', () => {
 		);
 
 		const envelope = assertStructuredError(result, 'invalid_input');
-		expect(envelope.message).toMatch(/Failed to update file:.*not allowed/);
-		expect(assertFileExists).not.toHaveBeenCalled();
+		expect(envelope.message).toMatch(/Failed to update file: uploads are disabled/);
+		expect(mwn.request).not.toHaveBeenCalled();
 		expect(submitUpload).not.toHaveBeenCalled();
 	});
 
-	it('lets unexpected guard errors fall through to the dispatcher', async () => {
-		vi.mocked(assertAllowedPath).mockRejectedValue(new Error('Connection refused'));
-		const { submitUpload, ctx } = ctxWith();
+	it('lets unexpected path-resolution errors fall through to the dispatcher', async () => {
+		const { submitUpload, ctx } = ctxWith({
+			uploadDirs: {
+				list: () => ['/home/user/uploads'],
+				resolve: () => Promise.reject(new Error('EACCES: permission denied')),
+			},
+		});
 
 		const result = await dispatch(
 			updateFile,
@@ -90,9 +71,9 @@ describe('update-file', () => {
 	});
 
 	it('returns not_found with routing hint when the file does not exist', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/var/lib/uploads/cat.jpg');
-		vi.mocked(assertFileExists).mockRejectedValue(new FileNotFoundError('Cat.jpg'));
-		const { submitUpload, ctx } = ctxWith();
+		const { submitUpload, ctx } = ctxWith({
+			mwn: createMockMwn({ request: vi.fn().mockResolvedValue(FILE_MISSING) }),
+		});
 
 		const result = await updateFile.handle(
 			{
@@ -109,8 +90,6 @@ describe('update-file', () => {
 	});
 
 	it('calls submitUpload with ignorewarnings: true and the formatted comment', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/var/lib/uploads/cat.jpg');
-		vi.mocked(assertFileExists).mockResolvedValue(undefined);
 		const submitUpload = vi.fn().mockResolvedValue({
 			result: 'Success',
 			filename: 'Cat.jpg',
@@ -143,8 +122,6 @@ describe('update-file', () => {
 	});
 
 	it('returns the same structured payload as upload-file on success', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/var/lib/uploads/cat.jpg');
-		vi.mocked(assertFileExists).mockResolvedValue(undefined);
 		const submitUpload = vi.fn().mockResolvedValue({
 			result: 'Success',
 			filename: 'Cat.jpg',
@@ -170,8 +147,6 @@ describe('update-file', () => {
 	});
 
 	it('dispatches generic upstream errors with the standard verb prefix', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/var/lib/uploads/cat.jpg');
-		vi.mocked(assertFileExists).mockResolvedValue(undefined);
 		const submitUpload = vi.fn().mockRejectedValue(new Error('Boom'));
 		const { ctx } = ctxWith({ submitUpload });
 
@@ -188,8 +163,6 @@ describe('update-file', () => {
 	});
 
 	it('maps permissiondenied-coded errors to permission_denied', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/var/lib/uploads/cat.jpg');
-		vi.mocked(assertFileExists).mockResolvedValue(undefined);
 		const err = Object.assign(new Error('You cannot reupload'), { code: 'permissiondenied' });
 		const submitUpload = vi.fn().mockRejectedValue(err);
 		const { ctx } = ctxWith({ submitUpload });
@@ -203,24 +176,5 @@ describe('update-file', () => {
 		});
 
 		assertStructuredError(result, 'permission_denied');
-	});
-
-	it('forwards ctx.uploadDirs.list() to the path guard', async () => {
-		vi.mocked(assertAllowedPath).mockResolvedValue('/home/user/uploads/x.jpg');
-		vi.mocked(assertFileExists).mockResolvedValue(undefined);
-		const submitUpload = vi.fn().mockResolvedValue({ result: 'Success' });
-		const { ctx } = ctxWith({ submitUpload });
-
-		await updateFile.handle(
-			{
-				filepath: '/home/user/uploads/x.jpg',
-				title: 'File:X',
-			},
-			ctx,
-		);
-
-		expect(assertAllowedPath).toHaveBeenCalledWith('/home/user/uploads/x.jpg', [
-			'/home/user/uploads',
-		]);
 	});
 });

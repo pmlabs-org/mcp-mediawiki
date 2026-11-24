@@ -6,7 +6,7 @@ import type { WikiConfig } from '../../src/config/loadConfig.ts';
 import type { WikiProbe } from '../../src/wikis/wikiProbe.ts';
 import { reconcileTools } from '../../src/runtime/reconcile.ts';
 import { extensionPacks } from '../../src/tools/extensions/index.ts';
-import { registerAllTools } from '../../src/tools/index.ts';
+import { allTools, registerAllTools } from '../../src/tools/index.ts';
 import { fakeContext } from '../helpers/fakeContext.ts';
 
 const wikiA: WikiConfig = {
@@ -62,13 +62,7 @@ async function connectClientAndServer(): Promise<{ client: Client; server: McpSe
 		remove: () => {},
 		isManagementAllowed: () => isManagementAllowedRef.current,
 	};
-	const activeWikiMock = {
-		get: () => ({ key: currentKey(), config: wikiStore.current }),
-		getDefaultKey: () => currentKey(),
-	};
 	const fakeProbe: WikiProbe = {
-		hasExtension: vi.fn(async () => false),
-		hasAnyExtension: vi.fn(async () => false),
 		inspect: vi.fn(async () => ({ reachable: true, extensions: new Set<string>() })),
 		invalidate: vi.fn(),
 	};
@@ -78,10 +72,11 @@ async function connectClientAndServer(): Promise<{ client: Client; server: McpSe
 			transport: 'stdio',
 			wikiProbe: fakeProbe,
 			extensionPacks,
+			descriptors: allTools,
 		});
 	const ctx = fakeContext({
 		wikis: wikiRegistryMock,
-		activeWiki: activeWikiMock,
+		defaultWikiKey: currentKey(),
 	});
 	const registered = registerAllTools(server, reconcile, ctx);
 	for (const [name, tool] of registered) {

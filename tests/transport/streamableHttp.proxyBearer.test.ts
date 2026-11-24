@@ -2,11 +2,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest';
 
 import express, { type Express } from 'express';
 import request from 'supertest';
-import {
-	createMcpRouteHandler,
-	type McpRouteOptions,
-	type ProxyConfigGetter,
-} from '../../src/transport/mcpRoute.ts';
+import { createMcpRouteHandler, type McpRouteOptions } from '../../src/transport/mcpRoute.ts';
 import {
 	AUTHENTICATION_REQUIRED_ERROR_CODE,
 	UPSTREAM_UNAVAILABLE_ERROR_CODE,
@@ -14,25 +10,27 @@ import {
 import { resolveUpstreamBearer } from '../../src/auth/upstreamBearer.ts';
 import { OAuthFlowError } from '../../src/auth/oauthFlow.ts';
 import { InMemoryProxyStore } from '../../src/auth/authorizationServer/proxyStore.ts';
+import type { HostedProxy } from '../../src/auth/authorizationServer/hostedProxy.ts';
+import { fakeHostedProxy } from '../helpers/fakeHostedProxy.ts';
 import { mintAccessToken } from '../../src/auth/authorizationServer/jwt.ts';
-import type { ProxyConfig } from '../../src/auth/authorizationServer/proxyConfig.ts';
+import { fakeProxyConfig } from '../helpers/fakeProxyConfig.ts';
 import type { WikiRegistry } from '../../src/wikis/wikiRegistry.ts';
 import type { WikiConfig } from '../../src/config/loadConfig.ts';
 import { getRuntimeToken } from '../../src/runtime/requestContext.ts';
+import { readAuthPolicy } from '../../src/runtime/authShape.ts';
+import { metricsOff } from '../helpers/metrics.ts';
 
-const pc = {
-	issuer: 'https://wiki.example/mcp',
+const pc = fakeProxyConfig({
 	signingKey: 'k'.repeat(32),
 	tokenExchangeBase: 'http://mediawiki.svc:80',
-	scriptpath: '/w',
-	upstreamClientId: 'UP',
-} as unknown as ProxyConfig;
+	upstreamClientSecret: undefined,
+});
+
+afterEach(() => {
+	vi.unstubAllEnvs();
+});
 
 describe('resolveUpstreamBearer', () => {
-	afterEach(() => {
-		vi.unstubAllEnvs();
-	});
-
 	it('returns the upstream access token for a valid JWT', async () => {
 		const store = new InMemoryProxyStore();
 		const id = store.putUpstreamToken({ accessToken: 'WA', expiresAt: Date.now() + 1e6 });
@@ -44,6 +42,24 @@ describe('resolveUpstreamBearer', () => {
 			scopes: [],
 		});
 		expect(await resolveUpstreamBearer(jwt, pc, store)).toMatchObject({ accessToken: 'WA' });
+	});
+
+	it('refuses a token issued while the proxy signed users in to another wiki', async () => {
+		const store = new InMemoryProxyStore();
+		const id = store.putUpstreamToken({
+			accessToken: 'WA',
+			expiresAt: Date.now() + 1e6,
+			wikiKey: 'elsewhere',
+		});
+		const jwt = await mintAccessToken({
+			issuer: pc.issuer,
+			signingKey: pc.signingKey,
+			upstreamTokenId: id,
+			ttlMs: 60_000,
+			scopes: [],
+		});
+
+		await expect(resolveUpstreamBearer(jwt, pc, store)).rejects.toThrow();
 	});
 
 	it('throws on an invalid JWT', async () => {
@@ -229,15 +245,22 @@ function fakeRegistry(wikis: Record<string, Partial<WikiConfig>>): WikiRegistry 
 	} as unknown as WikiRegistry;
 }
 
+// The token the served request would send to the proxy's wiki, 'test', and the
+// one it would send to any other wiki.
+interface Captured {
+	token?: string;
+	forOtherWiki?: string;
+	seen: boolean;
+}
+
 // A fake fetch-shaped handler captures the runtimeToken threaded into
 // withRequestContext: the route converts the request and calls fetch inside
 // the request-context scope, so the guard logic is exercised without booting
 // the real MCP serving machinery.
 function buildMcpApp(
 	registry: WikiRegistry,
-	getProxyConfig: ProxyConfigGetter | undefined,
-	store: InMemoryProxyStore | undefined,
-	captured: { token?: string; seen: boolean },
+	hostedProxy: HostedProxy | null,
+	captured: Captured,
 	refresh?: McpRouteOptions['refresh'],
 ): Express {
 	const app = express();
@@ -245,7 +268,8 @@ function buildMcpApp(
 	const fakeHandler = {
 		fetch: async (): Promise<Response> => {
 			captured.seen = true;
-			captured.token = getRuntimeToken();
+			captured.token = getRuntimeToken('test');
+			captured.forOtherWiki = getRuntimeToken('other');
 			return new Response(JSON.stringify({ ok: true }), {
 				status: 200,
 				headers: { 'content-type': 'application/json' },
@@ -255,10 +279,11 @@ function buildMcpApp(
 	app.post(
 		'/mcp',
 		createMcpRouteHandler(fakeHandler, {
+			auth: readAuthPolicy(process.env, 'http', hostedProxy, null),
 			wikiRegistry: registry,
-			getProxyConfig,
-			proxyStore: store,
 			refresh,
+			defaultWikiKey: 'test',
+			metrics: metricsOff(),
 		}),
 	);
 	return app;
@@ -274,25 +299,55 @@ const oauthWiki: Partial<WikiConfig> = {
 
 const body = { jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} };
 
-describe('POST /mcp proxy bearer rewire', () => {
-	it('threads the resolved UPSTREAM token (not the JWT) into the request context', async () => {
-		const store = new InMemoryProxyStore();
-		const id = store.putUpstreamToken({ accessToken: 'UPSTREAM-WA', expiresAt: Date.now() + 1e6 });
-		const jwt = await mintAccessToken({
-			issuer: pc.issuer,
-			signingKey: pc.signingKey,
-			upstreamTokenId: id,
-			ttlMs: 60_000,
-			scopes: [],
-		});
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+// One /mcp request from a caller signed in through the proxy, whose upstream
+// token is `accessToken`.
+async function serveSignedIn(
+	accessToken: string,
+): Promise<{ res: request.Response; captured: Captured; jwt: string }> {
+	const store = new InMemoryProxyStore();
+	const id = store.putUpstreamToken({ accessToken, expiresAt: Date.now() + 1e6 });
+	const jwt = await mintAccessToken({
+		issuer: pc.issuer,
+		signingKey: pc.signingKey,
+		upstreamTokenId: id,
+		ttlMs: 60_000,
+		scopes: [],
+	});
+	const captured: Captured = { seen: false };
+	const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), fakeHostedProxy(pc, store), captured);
+	const res = await request(app)
+		.post('/mcp')
+		.set('Content-Type', 'application/json')
+		.set('Authorization', `Bearer ${jwt}`)
+		.send(body);
+	return { res, captured, jwt };
+}
 
-		const res = await request(app)
-			.post('/mcp')
-			.set('Content-Type', 'application/json')
-			.set('Authorization', `Bearer ${jwt}`)
-			.send(body);
+// One /mcp request forwarding `bearer` under the deprecated opt-in.
+async function serveForwarded(
+	bearer: string,
+): Promise<{ res: request.Response; captured: Captured }> {
+	vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
+	const captured: Captured = { seen: false };
+	const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), null, captured);
+	const res = await request(app)
+		.post('/mcp')
+		.set('Content-Type', 'application/json')
+		.set('Authorization', `Bearer ${bearer}`)
+		.send(body);
+	return { res, captured };
+}
+
+describe('POST /mcp proxy bearer rewire', () => {
+	it('offers the upstream token only to the wiki the proxy signs in to', async () => {
+		const { captured } = await serveSignedIn('UPSTREAM-WA');
+
+		expect(captured.token).toBe('UPSTREAM-WA');
+		expect(captured.forOtherWiki).toBeUndefined();
+	});
+
+	it('threads the resolved UPSTREAM token (not the JWT) into the request context', async () => {
+		const { res, captured, jwt } = await serveSignedIn('UPSTREAM-WA');
 
 		expect(res.status).not.toBe(401);
 		expect(captured.seen).toBe(true);
@@ -303,8 +358,12 @@ describe('POST /mcp proxy bearer rewire', () => {
 
 	it('returns 401 + WWW-Authenticate for an invalid proxy JWT on a proxy wiki', async () => {
 		const store = new InMemoryProxyStore();
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -328,8 +387,12 @@ describe('POST /mcp proxy bearer rewire', () => {
 
 	it('echoes a string request id on the 401', async () => {
 		const store = new InMemoryProxyStore();
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -351,8 +414,12 @@ describe('POST /mcp proxy bearer rewire', () => {
 		['no method', { jsonrpc: '2.0', id: 1, result: {} }],
 	])('omits the id on the 401 for %s', async (_label, payload) => {
 		const store = new InMemoryProxyStore();
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -366,8 +433,12 @@ describe('POST /mcp proxy bearer rewire', () => {
 
 	it('serves a tokenless proxy request anonymously (no 401, undefined token)', async () => {
 		const store = new InMemoryProxyStore();
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+		);
 
 		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
 
@@ -377,11 +448,11 @@ describe('POST /mcp proxy bearer rewire', () => {
 	});
 
 	it('serves a tokenless request when the proxy is off and forwarding is not opted into', async () => {
-		const captured: { token?: string; seen: boolean } = { seen: false };
+		const captured: Captured = { seen: false };
 		// An OAuth-only wiki with no proxy and no forwarding leaves a caller nothing
 		// it can supply, so the old discovery challenge would send it round a loop it
 		// cannot complete. That state is an operator misconfiguration, not a 401.
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), null, captured);
 
 		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
 
@@ -391,8 +462,8 @@ describe('POST /mcp proxy bearer rewire', () => {
 	});
 
 	it('refuses a caller-supplied bearer when the proxy is off and forwarding is not opted into', async () => {
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), null, captured);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -407,8 +478,8 @@ describe('POST /mcp proxy bearer rewire', () => {
 
 	it('challenges a tokenless request once forwarding is opted into', async () => {
 		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), null, captured);
 
 		const res = await request(app).post('/mcp').set('Content-Type', 'application/json').send(body);
 
@@ -419,19 +490,17 @@ describe('POST /mcp proxy bearer rewire', () => {
 	});
 
 	it('forwards the raw bearer once forwarding is opted into', async () => {
-		vi.stubEnv('MCP_ALLOW_BEARER_PASSTHROUGH', 'true');
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => null, undefined, captured);
-
-		const res = await request(app)
-			.post('/mcp')
-			.set('Content-Type', 'application/json')
-			.set('Authorization', 'Bearer raw-wiki-token')
-			.send(body);
+		const { res, captured } = await serveForwarded('raw-wiki-token');
 
 		expect(res.status).not.toBe(401);
 		expect(captured.seen).toBe(true);
 		expect(captured.token).toBe('raw-wiki-token');
+	});
+
+	it('leaves a forwarded bearer for the caller to aim at any wiki', async () => {
+		const { captured } = await serveForwarded('raw-wiki-token');
+
+		expect(captured.forOtherWiki).toBe('raw-wiki-token');
 	});
 
 	it('returns 503 (not 401) when a proxy refresh fails transiently for an expired token', async () => {
@@ -449,8 +518,13 @@ describe('POST /mcp proxy bearer rewire', () => {
 			scopes: [],
 		});
 		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+			refresh,
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -482,8 +556,13 @@ describe('POST /mcp proxy bearer rewire', () => {
 			scopes: [],
 		});
 		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('invalid_grant', 'dead'));
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+			refresh,
+		);
 
 		const res = await request(app)
 			.post('/mcp')
@@ -514,8 +593,13 @@ describe('POST /mcp proxy bearer rewire', () => {
 			scopes: [],
 		});
 		const refresh = vi.fn().mockRejectedValue(new OAuthFlowError('transient', 'wiki 503'));
-		const captured: { token?: string; seen: boolean } = { seen: false };
-		const app = buildMcpApp(fakeRegistry({ test: oauthWiki }), () => pc, store, captured, refresh);
+		const captured: Captured = { seen: false };
+		const app = buildMcpApp(
+			fakeRegistry({ test: oauthWiki }),
+			fakeHostedProxy(pc, store),
+			captured,
+			refresh,
+		);
 
 		const res = await request(app)
 			.post('/mcp')

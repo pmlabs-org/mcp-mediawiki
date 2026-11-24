@@ -10,6 +10,13 @@ interface RetryableError {
 	disableRetry?: boolean;
 }
 
+const instances = new WeakMap<Mwn, Mwn>();
+
+/** The instance a view from `withCallBounds` forwards to; any other Mwn is its own instance. */
+export function instanceBehind(mwn: Mwn): Mwn {
+	return instances.get(mwn) ?? mwn;
+}
+
 /**
  * Returns a view of `bot` whose MediaWiki API calls stop when `deadline`
  * expires, and when the caller walks away if a `cancellation` signal is given.
@@ -49,14 +56,13 @@ interface RetryableError {
 export function withCallBounds(bot: Mwn, deadline: CallDeadline, cancellation?: AbortSignal): Mwn {
 	const signal =
 		cancellation === undefined ? deadline.signal : AbortSignal.any([deadline.signal, cancellation]);
-	return new Proxy(bot, {
+	const view = new Proxy(bot, {
 		get(target, prop, receiver): unknown {
 			if (prop === 'massQuery') {
 				// `massQuery` puts per-batch errors IN its result array instead of
-				// rejecting, so a stopped batch arrives as data: `get-pages` skips an
-				// entry with no `query` and reports every page as missing, and
-				// `mwn.read` dereferences it into a TypeError. Ordinary per-batch
-				// failures are left alone, as mwn intends.
+				// rejecting, so a stopped batch arrives as data, which `mwn.read`
+				// dereferences into a TypeError. Ordinary per-batch failures are left
+				// to the caller, as mwn intends.
 				return async (...args: Parameters<Mwn['massQuery']>): Promise<unknown> => {
 					// Applied to the receiver so the internal `this.request` hop stays
 					// bounded.
@@ -94,4 +100,6 @@ export function withCallBounds(bot: Mwn, deadline: CallDeadline, cancellation?: 
 			};
 		},
 	});
+	instances.set(view, bot);
+	return view;
 }

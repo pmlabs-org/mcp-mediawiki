@@ -1,47 +1,47 @@
 import type { Logger } from './logger.ts';
-import type { ToolContext } from './context.ts';
+import type { SharedContext } from './context.ts';
+import type { AuthPolicy } from './authShape.ts';
+import type { Metrics } from './metrics.ts';
 import type { AppState } from '../wikis/state.ts';
-import type { ProxyConfig } from '../auth/authorizationServer/proxyConfig.ts';
 import { WikiCacheImpl } from '../wikis/wikiCache.ts';
 import { SectionServiceImpl } from '../services/sectionService.ts';
 import { EditServiceImpl } from '../services/editService.ts';
-import { RevisionNormalizerImpl } from '../services/revisionNormalize.ts';
-import { ResponseFormatterImpl } from '../results/response.ts';
-import { ErrorClassifierImpl } from '../errors/classifyError.ts';
+import { RevisionNormalizer } from '../services/revisionNormalize.ts';
+import { ResponseFormatter } from '../results/response.ts';
+import { ErrorClassifier } from '../errors/classifyError.ts';
 import { extensionErrorVocabulary, extensionPacks } from '../tools/extensions/index.ts';
 import { withCallBounds } from '../wikis/abortableMwn.ts';
 import { getRequestDeadline, getRequestSignal } from './requestContext.ts';
 import { callDeadline, WIKI_CALL_TIMEOUT_MS } from './callDeadline.ts';
 
-export function createToolContext(deps: {
+export function createSharedContext(deps: {
 	logger: Logger;
 	state: AppState;
-	transport: 'http' | 'stdio';
-	getProxyConfig?: () => ProxyConfig | null;
-}): ToolContext {
-	const { logger, state, transport, getProxyConfig } = deps;
+	auth: AuthPolicy;
+	metrics: Metrics;
+}): SharedContext {
+	const { logger, state, auth, metrics } = deps;
 	return {
 		// The cached instance is shared, so bounds go on a per-request view rather
 		// than on the instance. Taking the deadline from the request scope is what
 		// makes a tool that acquires the wiki twice spend one budget, not two.
-		mwn: async (wikiKey?: string) => {
+		mwnFor: async (wikiKey: string) => {
 			const bot = await state.mwnProvider.get(wikiKey);
 			const deadline = getRequestDeadline() ?? callDeadline(WIKI_CALL_TIMEOUT_MS, 'calling');
 			return withCallBounds(bot, deadline, getRequestSignal());
 		},
 		wikis: state.wikiRegistry,
-		activeWiki: state.activeWiki,
+		defaultWikiKey: state.defaultWikiKey,
 		uploadDirs: state.uploadDirs,
-		wikiCache: new WikiCacheImpl(state.mwnProvider, state.siteInfoCache, state.wikiProbe),
-		siteInfoCache: state.siteInfoCache,
+		wikiCache: new WikiCacheImpl(state.mwnProvider, state.wikiProbe),
 		wikiProbe: state.wikiProbe,
 		sections: new SectionServiceImpl(),
-		edit: new EditServiceImpl(state.activeWiki),
-		revision: new RevisionNormalizerImpl(),
-		format: new ResponseFormatterImpl(),
-		errors: new ErrorClassifierImpl(extensionErrorVocabulary(extensionPacks)),
+		editFor: (wiki) => new EditServiceImpl(wiki.config.tags),
+		revision: new RevisionNormalizer(),
+		format: new ResponseFormatter(),
+		errors: new ErrorClassifier(extensionErrorVocabulary(extensionPacks)),
 		logger,
-		transport,
-		getProxyConfig,
+		auth,
+		metrics,
 	};
 }

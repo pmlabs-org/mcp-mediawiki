@@ -2,11 +2,20 @@ import { describe, it, expect } from 'vitest';
 import type { CallToolResult } from '@modelcontextprotocol/server';
 import { dispatch } from '../../src/runtime/dispatcher.ts';
 import type { Tool } from '../../src/runtime/tool.ts';
+import type { SharedContext } from '../../src/runtime/context.ts';
+import type { Mwn } from 'mwn';
 import { fakeContext } from '../helpers/fakeContext.ts';
-import { getRequestWiki } from '../../src/runtime/requestContext.ts';
+import { writingWiki } from '../helpers/writingWiki.ts';
+import { createSharedContext } from '../../src/runtime/createContext.ts';
+import { createAppState } from '../../src/wikis/state.ts';
+import type { MwnProvider } from '../../src/wikis/mwnProvider.ts';
+import { logger } from '../../src/runtime/logger.ts';
+import type { WikiConfig } from '../../src/config/loadConfig.ts';
 import { updatePage } from '../../src/tools/update-page.ts';
 import { getPage } from '../../src/tools/get-page.ts';
 import { cargoQuery } from '../../src/tools/extensions/cargo/cargo-query.ts';
+import { fakeAuthPolicy } from '../helpers/fakeAuthPolicy.ts';
+import { metricsOff } from '../helpers/metrics.ts';
 
 // A minimal wiki-scoped tool that reports the wiki it ran against.
 const probe: Tool<Record<string, never>> = {
@@ -15,7 +24,7 @@ const probe: Tool<Record<string, never>> = {
 	inputSchema: {},
 	annotations: {} as never,
 	async handle(_args, ctx): Promise<CallToolResult> {
-		return ctx.format.ok({ ranAgainst: getRequestWiki() });
+		return ctx.format.ok({ ranAgainst: ctx.wiki.key });
 	},
 };
 
@@ -72,9 +81,9 @@ describe('dispatch wiki resolution', () => {
 
 	it('isolates concurrent calls targeting different wikis', async () => {
 		const ctx = fakeContext();
-		// A tool that yields to a real macrotask before reading the request
-		// wiki, so both dispatches are suspended at the timer at the same time —
-		// a leaked or shared wikiKey store would surface here.
+		// A tool that yields to a real macrotask before reading its wiki, so both
+		// dispatches are suspended at the timer at the same time — a context
+		// shared between calls would surface here.
 		const slowProbe: Tool<Record<string, never>> = {
 			name: 'slow-probe',
 			description: 'test probe that yields before reading the wiki',
@@ -82,7 +91,7 @@ describe('dispatch wiki resolution', () => {
 			annotations: {} as never,
 			async handle(_args, ctx): Promise<CallToolResult> {
 				await new Promise((r) => setTimeout(r, 0));
-				return ctx.format.ok({ ranAgainst: getRequestWiki() });
+				return ctx.format.ok({ ranAgainst: ctx.wiki.key });
 			},
 		};
 		const [a, b] = await Promise.all([
@@ -91,6 +100,53 @@ describe('dispatch wiki resolution', () => {
 		]);
 		expect(ranAgainst(a)).toBe('fr.wikipedia.org');
 		expect(ranAgainst(b)).toBe('de.wikipedia.org');
+	});
+
+	it('writes to the wiki the call names, with its tags', async () => {
+		const site = (tags: string): WikiConfig => ({
+			sitename: 'S',
+			server: 'https://s.test',
+			articlepath: '/wiki',
+			scriptpath: '/w',
+			tags,
+		});
+		const main = writingWiki({ edit: { result: 'Success' } });
+		const other = writingWiki({ edit: { result: 'Success' } });
+		const reachable: Record<string, Mwn> = { main: main.mwn, other: other.mwn };
+		const mwnProvider: MwnProvider = {
+			get: async (key) => reachable[key],
+			invalidate: () => {},
+		};
+		const state = {
+			...createAppState({
+				defaultWiki: 'main',
+				wikis: { main: site('main-tag'), other: site('other-tag') },
+				uploadDirs: [],
+			}),
+			mwnProvider,
+		};
+		const writing: Tool<Record<string, never>> = {
+			...probe,
+			async handle(_args, c): Promise<CallToolResult> {
+				await c.edit.submit(await c.mwn(), { action: 'edit', title: 'X', text: 'y' });
+				return c.format.ok({});
+			},
+		};
+
+		await dispatch(
+			writing,
+			createSharedContext({
+				logger,
+				state,
+				auth: fakeAuthPolicy(),
+				metrics: metricsOff(),
+			}),
+		)({
+			wiki: 'other',
+		} as never);
+
+		expect(other.sentWrite().get('tags')).toBe('other-tag');
+		expect(main.writes).toHaveLength(0);
 	});
 });
 
@@ -103,7 +159,7 @@ describe('dispatch wiki echo', () => {
 
 	it('does not stamp wiki onto a non-wiki-scoped tool', async () => {
 		const ctx = fakeContext();
-		const mgmt: Tool<Record<string, never>> = {
+		const mgmt: Tool<Record<string, never>, SharedContext> = {
 			name: 'mgmt-probe',
 			description: 'non wiki tool',
 			inputSchema: {},
@@ -135,13 +191,37 @@ describe('dispatch capability guard', () => {
 				remove: (() => {}) as never,
 				isManagementAllowed: () => true,
 			},
-			activeWiki: {
-				get: () => ({ key: 'test-wiki', config: roConfig as never }),
-				getDefaultKey: () => 'test-wiki',
-			},
+			defaultWikiKey: 'test-wiki',
 		});
 		const result = await dispatch(updatePage, ctx)({ title: 'X', source: 'y' } as never);
 		expect(result.isError).toBe(true);
+		expect(JSON.stringify(result.content)).toContain('read-only');
+	});
+
+	it('judges a write by the wiki the call resolved, though it is removed while the call runs', async () => {
+		const roConfig = {
+			sitename: 'T',
+			server: 'https://t',
+			articlepath: '/wiki',
+			scriptpath: '/w',
+			readOnly: true,
+		};
+		let lookups = 0;
+		const ctx = fakeContext({
+			wikis: {
+				getAll: () => ({}) as never,
+				// Answers the call's own lookup, then reads as removed.
+				get: ((k: string) =>
+					k === 'test-wiki' && lookups++ === 0 ? roConfig : undefined) as never,
+				add: (() => {}) as never,
+				remove: (() => {}) as never,
+				isManagementAllowed: () => true,
+			},
+			defaultWikiKey: 'test-wiki',
+		});
+
+		const result = await dispatch(updatePage, ctx)({ title: 'X', source: 'y' } as never);
+
 		expect(JSON.stringify(result.content)).toContain('read-only');
 	});
 
@@ -160,13 +240,8 @@ describe('dispatch capability guard', () => {
 				remove: (() => {}) as never,
 				isManagementAllowed: () => true,
 			},
-			activeWiki: {
-				get: () => ({ key: 'test-wiki', config: config as never }),
-				getDefaultKey: () => 'test-wiki',
-			},
+			defaultWikiKey: 'test-wiki',
 			wikiProbe: {
-				hasExtension: (async () => false) as never,
-				hasAnyExtension: (async () => false) as never,
 				inspect: (async () => ({ reachable: true, extensions: new Set() })) as never,
 				invalidate: (() => {}) as never,
 			},
@@ -187,7 +262,7 @@ describe('dispatch capability guard', () => {
 			oauth2ClientId: 'client-id',
 		};
 		const ctx = fakeContext({
-			transport: 'http',
+			auth: fakeAuthPolicy({ transport: 'http' }),
 			wikis: {
 				getAll: () => ({ 'test-wiki': oauthConfig }) as never,
 				get: ((k: string) => (k === 'test-wiki' ? oauthConfig : undefined)) as never,
@@ -195,10 +270,7 @@ describe('dispatch capability guard', () => {
 				remove: (() => {}) as never,
 				isManagementAllowed: () => true,
 			},
-			activeWiki: {
-				get: () => ({ key: 'test-wiki', config: oauthConfig as never }),
-				getDefaultKey: () => 'test-wiki',
-			},
+			defaultWikiKey: 'test-wiki',
 		});
 		const result = await dispatch(getPage, ctx)({ title: 'X' } as never);
 		expect(result.isError).toBe(true);
